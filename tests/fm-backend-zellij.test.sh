@@ -184,8 +184,8 @@ test_version_check_refuses_old_version() {
 test_version_check_refuses_missing_zellij() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT" 2>&1 )
+  out=$( PATH="$dir/empty-fakebin" FM_ROOT_OVERRIDE="$ROOT" \
+    /bin/bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when zellij is not installed"
   assert_contains "$out" "not installed" "version_check did not report zellij as missing"
@@ -194,18 +194,53 @@ test_version_check_refuses_missing_zellij() {
 
 # --- session name resolution --------------------------------------------------
 
-test_session_defaults_to_firstmate() {
-  local out
-  out=$( bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" )
-  [ "$out" = firstmate ] || fail "default session should be 'firstmate', got '$out'"
-  pass "fm_backend_zellij_session: defaults to 'firstmate' when FM_ZELLIJ_SESSION is unset"
+test_session_auto_selects_exactly_one_live_session() {
+  local dir fb out
+  dir="$TMP_ROOT/session-auto-one"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'old-session [EXITED]\nonly-live' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" )
+  [ "$out" = only-live ] || fail "single live session should be selected, got '$out'"
+  pass "fm_backend_zellij_session: auto-selects exactly one live session and ignores exited entries"
 }
 
-test_session_honors_override() {
-  local out
-  out=$( FM_ZELLIJ_SESSION=fm-test-iso bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" )
-  [ "$out" = fm-test-iso ] || fail "FM_ZELLIJ_SESSION override was not honored, got '$out'"
-  pass "fm_backend_zellij_session: honors the FM_ZELLIJ_SESSION test-isolation override"
+test_session_honors_live_override() {
+  local dir fb out
+  dir="$TMP_ROOT/session-override-live"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'fm-test-iso\nother-live' FM_ZELLIJ_SESSION=fm-test-iso \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" )
+  [ "$out" = fm-test-iso ] || fail "live FM_ZELLIJ_SESSION override was not honored, got '$out'"
+  pass "fm_backend_zellij_session: honors an explicit live session"
+}
+
+test_session_refuses_exited_override() {
+  local dir fb out status
+  dir="$TMP_ROOT/session-override-exited"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'firstmate-nono [EXITED]\nimplacable-mountain' FM_ZELLIJ_SESSION=firstmate-nono \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_container_ensure' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "container_ensure must refuse an exited configured session"
+  assert_contains "$out" "is not live" "exited-session refusal did not identify the stale configured session"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''attach' "container_ensure resurrected the exited configured session"
+  pass "fm_backend_zellij_container_ensure: refuses an exited configured session without resurrecting it"
+}
+
+test_session_refuses_ambiguous_live_inventory() {
+  local dir fb out status
+  dir="$TMP_ROOT/session-auto-ambiguous"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'one-live\ntwo-live' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "unset session selection must refuse multiple live sessions"
+  assert_contains "$out" "multiple live zellij sessions" "ambiguous-session refusal did not ask for an explicit selection"
+  pass "fm_backend_zellij_session: refuses ambiguity instead of choosing a live session"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -392,7 +427,7 @@ test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged() {
   pass "fm_backend_zellij_resolve_bare_selector: requires untagged legacy labels to be globally unique across sessions"
 }
 
-# --- session_exists / server_ensure -------------------------------------------
+# --- session_exists -----------------------------------------------------------
 
 test_session_exists_true_when_listed() {
   local dir fb out
@@ -415,18 +450,6 @@ test_session_exists_false_when_absent() {
   status=$?
   [ "$status" -ne 0 ] || fail "session_exists should report false when the session is absent"
   pass "fm_backend_zellij_session_exists: false when the session name is not listed"
-}
-
-test_server_ensure_skips_attach_when_already_exists() {
-  local dir fb
-  dir="$TMP_ROOT/server-reuse"; mkdir -p "$dir/responses"
-  fb=$(make_zellij_fakebin "$dir")
-  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST="firstmate" \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
-  expect_code 0 $? "server_ensure should succeed immediately when the session already exists"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''attach' "server_ensure should not call attach when the session already exists"
-  pass "fm_backend_zellij_server_ensure: reuses an existing session without calling attach"
 }
 
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
@@ -853,9 +876,9 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
-    "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
+    "$ROOT/bin/fm-teardown.sh" zghost --force 2>&1 )
   status=$?
-  expect_code 0 "$status" "fm-teardown should succeed for a zellij scout whose worktree is already gone: $out"
+  expect_code 0 "$status" "forced fm-teardown should succeed for a zellij scout whose worktree is already gone: $out"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''list-tabs'$'\x1f''--json' \
     "fm-teardown did not verify the recorded zellij_tab_id against the task label"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
@@ -1298,8 +1321,10 @@ test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
 test_version_check_refuses_missing_zellij
-test_session_defaults_to_firstmate
-test_session_honors_override
+test_session_auto_selects_exactly_one_live_session
+test_session_honors_live_override
+test_session_refuses_exited_override
+test_session_refuses_ambiguous_live_inventory
 test_parse_target
 test_normalize_key
 test_scoped_title_uses_primary_home_label
@@ -1314,7 +1339,6 @@ test_resolve_bare_selector_prefers_later_session_scoped_title_over_legacy
 test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
-test_server_ensure_skips_attach_when_already_exists
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label

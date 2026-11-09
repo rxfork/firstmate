@@ -2386,6 +2386,88 @@ SH
   done
 }
 
+test_treehouse_github_ssh_uses_scoped_https_transport() {
+  local rec id out status pane_log git_log real_git origin treehouse_line launch
+  id=treehouse-github-https
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  origin=git@github.com:example/project.git
+  git -C "$PROJ_DIR" fetch --quiet origin
+  git -C "$PROJ_DIR" remote set-head origin main
+  git -C "$PROJ_DIR" remote set-url origin "$origin"
+  fm_test_fake_gh "$FAKEBIN_DIR"
+  pane_log="$CASE_DIR/pane.log"
+  git_log="$CASE_DIR/git.log"
+  real_git=$(command -v git)
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *' remote set-head origin --auto') exit 0 ;;
+esac
+for arg in "\$@"; do
+  if [ "\$arg" = fetch ]; then
+    printf '%s\n' "\$*" >> "\${FM_TEST_GIT_LOG:?}"
+    exit 0
+  fi
+done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+
+  out=$(FM_TEST_PANE_LOG="$pane_log" FM_TEST_GIT_LOG="$git_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "GitHub SSH spawn should succeed through scoped HTTPS transport: $out"
+  treehouse_line=$(grep -m1 'treehouse get' "$pane_log")
+  assert_contains "$treehouse_line" 'GIT_CONFIG_COUNT=4' \
+    "treehouse acquisition did not receive bounded Git configuration"
+  assert_contains "$treehouse_line" 'credential.https://github.com.helper' \
+    "treehouse acquisition did not receive the GitHub credential helper"
+  assert_contains "$treehouse_line" 'git@github.com:' \
+    "treehouse acquisition did not receive the scp-style URL rewrite"
+  assert_contains "$treehouse_line" 'ssh://git@github.com/' \
+    "treehouse acquisition did not receive the URL-style rewrite"
+  assert_contains "$(cat "$pane_log")" 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0' \
+    "treehouse acquisition policy was not cleared from the pane before worker launch"
+  [ "$(wc -l < "$git_log")" -eq 2 ] || fail "freshening the acquired worktree should perform exactly two scoped fetches"
+  [ "$(grep -Fc 'credential.https://github.com.helper=!gh auth git-credential' "$git_log")" -eq 2 ] \
+    || fail "not every post-acquisition fetch used the gh credential helper"
+  [ "$(git -C "$PROJ_DIR" remote get-url origin)" = "$origin" ] \
+    || fail "GitHub HTTPS transport changed the configured origin"
+  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  assert_not_contains "$launch" 'GIT_CONFIG_COUNT=4' \
+    "acquisition-only Git configuration leaked into the worker launch"
+  pass "treehouse acquisition and base refresh use command-scoped gh HTTPS without changing the remote or worker environment"
+}
+
+test_treehouse_github_ssh_requires_gh_auth_before_endpoint() {
+  local rec id out status origin
+  id=treehouse-github-auth-refusal
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  origin=git@github.com:example/project.git
+  git -C "$PROJ_DIR" remote set-url origin "$origin"
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] && exit 1
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/gh"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "missing gh auth must refuse the spawn"
+  assert_contains "$out" "requires an active 'gh auth login'" \
+    "missing gh auth refusal was not actionable"
+  assert_contains "$out" "refusing to fall back to SSH" \
+    "missing gh auth refusal did not rule out SSH fallback"
+  [ ! -e "$FAKEBIN_DIR/.spawn-window" ] || fail "missing gh auth created an endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing gh auth delivered a worker launch"
+  [ "$(git -C "$PROJ_DIR" remote get-url origin)" = "$origin" ] \
+    || fail "missing gh auth changed the configured origin"
+  pass "missing gh auth refuses before endpoint creation and never falls back to SSH"
+}
+
 test_invoker_worker_environment_forwarding() {
   local rec id out status probe pane_log launch treehouse_line treehouse_seen result expected
   local wrapper_path actual_path root_value lavish_value nm_value
@@ -2682,6 +2764,8 @@ SH
 }
 
 test_launch_environment_allowlist
+test_treehouse_github_ssh_uses_scoped_https_transport
+test_treehouse_github_ssh_requires_gh_auth_before_endpoint
 test_invoker_worker_environment_forwarding
 test_invoker_worker_environment_invalid_names_refuse
 test_launch_environment_invalid_config_refuses

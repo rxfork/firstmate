@@ -985,6 +985,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-github-https-lib.sh
+. "$SCRIPT_DIR/fm-github-https-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -1770,6 +1772,7 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_GITHUB_HTTPS=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1963,14 +1966,15 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A fresh polytoken spawn that fails and leaves no record must leave the pool
+  # An eligible fresh spawn that fails and leaves no record must leave the pool
   # as it found it. Before its launch is delivered, the endpoint it opened holds nothing but
   # the shell whose `treehouse get` leases the slot, so closing it returns the
   # slot to the pool and leaves no window or tab for a retry to trip over; the
   # Firstmate wiring, task temp root, and staged launch file it wrote go with it.
   # Once a launch was delivered into an endpoint still open, a worker may be
   # running there, so those stay for the operator, as the refusal says.
-  if [ "$status" -ne 0 ] && [ "${HARNESS:-}" = polytoken ] &&
+  if [ "$status" -ne 0 ] &&
+    { [ "${HARNESS:-}" = polytoken ] || [ "${BACKEND:-}" = zellij ]; } &&
     { [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] || [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] ||
       [ "$SPAWN_TASK_TMP_CREATED" = 1 ] || [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; } &&
     [ "$RELAUNCH" -eq 0 ] &&
@@ -4619,6 +4623,22 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_ORIGIN_URL=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
+  if fm_git_origin_is_github_ssh "$SPAWN_ORIGIN_URL"; then
+    fm_git_github_https_require_auth || exit 1
+    SPAWN_GITHUB_HTTPS=1
+  fi
+fi
+
+spawn_treehouse_get() {
+  if [ "$SPAWN_GITHUB_HTTPS" = 1 ]; then
+    fm_git_github_https_env treehouse get "$@"
+  else
+    treehouse get "$@"
+  fi
+}
+
 real_path_or_raw() { # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -4704,9 +4724,9 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
-# fresh polytoken spawn closes its endpoint on abort, so only it points away
-# from the window; every other harness keeps the plain inspect pointer.
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. A fresh
+# endpoint registered for exact abort cleanup points away from the window;
+# every other launch keeps the plain inspect pointer.
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
@@ -4827,7 +4847,7 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
     }
     return 0
   fi
-  if ! git -C "$worktree" fetch --quiet origin; then
+  if ! fm_git_with_origin_transport "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -4844,7 +4864,7 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
     }
   fi
   target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  if ! fm_git_with_origin_transport "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -5477,7 +5497,7 @@ EOF
       # A durable lease (bin/fm-home-seed.sh's pattern): there is no pane to run
       # the interactive `treehouse get` in, and a slot a live T3 thread points at
       # must never be handed on while that thread could re-create it.
-      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+      WT=$(cd "$PROJ_ABS" && spawn_treehouse_get --lease --lease-holder "$ID") || {
         echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
         exit 1
       }
@@ -5502,10 +5522,11 @@ EOF
     T3CODE_ABORT_CLEANUP=1
     ;;
   esac
-  # Orca and the Herdr projection own their own abort cleanup above; every other
-  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
-  # the spawn ends with no record before its launch is delivered.
-  if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+  # Orca and the Herdr projection own their own abort cleanup above. Polytoken
+  # keeps its existing all-backend cleanup; Zellij also closes every exact fresh
+  # task tab when acquisition fails before a worker launch or task record.
+  if { [ "$HARNESS" = polytoken ] || [ "$BACKEND" = zellij ]; } &&
+    [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
     SPAWN_FRESH_ENDPOINT_OPENED=1
   fi
 fi
@@ -5594,7 +5615,7 @@ spawn_send_key() { # <target> <key>
 # outlives its pane, so an aborted spawn returns it (spawn_abort_cleanup) and
 # bin/fm-teardown.sh returns it for a finished task.
 spawn_lease_herdr_slot() {
-  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+  WT=$(cd "$PROJ_ABS" && spawn_treehouse_get --lease --lease-holder "$ID") || {
     echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS; $(spawn_endpoint_hint)" >&2
     exit 1
   }
@@ -6140,6 +6161,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     spawn_lease_herdr_slot
   else
     treehouse_command='treehouse get'
+    if [ "$SPAWN_GITHUB_HTTPS" = 1 ]; then
+      treehouse_command="$(fm_git_github_https_shell_prefix) $treehouse_command"
+    fi
     for worker_env_name in PATH TREEHOUSE_ROOT; do
       worker_env_forward_has "$worker_env_name" || continue
       if worker_env_forward_is_set "$worker_env_name"; then
@@ -6211,6 +6235,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
     else
       validate_spawn_worktree "treehouse get" "$T"
+    fi
+    if [ "$SPAWN_GITHUB_HTTPS" = 1 ]; then
+      spawn_send_text_line "$WT_TARGET" "$(fm_git_github_https_unset_command)" || {
+        echo "error: task $ID's endpoint could not clear the acquisition-only Git configuration; refusing to launch a worker with transport policy in its ambient environment" >&2
+        exit 1
+      }
     fi
   fi
 

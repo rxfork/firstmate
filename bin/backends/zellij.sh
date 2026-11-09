@@ -9,11 +9,11 @@
 # bin/fm-backend.sh's fm_backend_source in normal operation; the unit tests
 # source it directly.
 #
-# Session shape (report "Zellij implementation choices" #1, unchanged by
-# empirical verification): ONE zellij session (default name "firstmate",
-# overridable via FM_ZELLIJ_SESSION for test isolation - mirrors herdr's
-# HERDR_SESSION), ONE tab per task, with caller-facing label "fm-<id>" and a
-# home-scoped actual title. No per-home workspace split (unlike herdr's later
+# Session shape: ONE already-live zellij session, selected explicitly through
+# FM_ZELLIJ_SESSION or automatically only when exactly one live session exists;
+# ONE tab per task, with caller-facing label "fm-<id>" and a home-scoped actual
+# title. Missing, exited, and ambiguous sessions refuse instead of being created
+# or guessed. No per-home workspace split (unlike herdr's later
 # P3 refinement): zellij has no workspace concept, only sessions/tabs/panes,
 # so this stays exactly the report's original choice. Target string shape:
 # "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
@@ -130,14 +130,38 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_ZELLIJ_MIN_MAJOR=0
 FM_BACKEND_ZELLIJ_MIN_MINOR=44
 
-# fm_backend_zellij_session: the session name this spawn/op uses.
-# FM_ZELLIJ_SESSION mirrors herdr's HERDR_SESSION ambient-selection knob: an
-# operator (or firstmate's own isolated test harness) sets it explicitly;
-# absent means the shared "firstmate" session. Do not use this alone for
-# destructive test cleanup; tests/zellij-test-safety.sh documents and guards
-# that path (mirrors tests/herdr-test-safety.sh).
+# fm_backend_zellij_session: resolve the live session this spawn uses.
+# An explicit FM_ZELLIJ_SESSION must already be live; an exited or missing
+# session is never recreated. Without an override, exactly one live session is
+# selected and later recorded in task metadata. Zero or multiple live sessions
+# refuse rather than creating or guessing.
+fm_backend_zellij_live_sessions() {
+  zellij list-sessions --short --no-formatting 2>/dev/null | awk 'NF == 1 { print }'
+}
+
 fm_backend_zellij_session() {
-  printf '%s' "${FM_ZELLIJ_SESSION:-firstmate}"
+  local configured=${FM_ZELLIJ_SESSION:-} sessions count
+  if [ -n "$configured" ]; then
+    if fm_backend_zellij_session_exists "$configured"; then
+      printf '%s' "$configured"
+      return 0
+    fi
+    echo "error: configured zellij session '$configured' is not live; refusing to create or resurrect it" >&2
+    return 1
+  fi
+  sessions=$(fm_backend_zellij_live_sessions)
+  count=$(printf '%s\n' "$sessions" | awk 'NF { n++ } END { print n+0 }')
+  case "$count" in
+    1) printf '%s' "$sessions" ;;
+    0)
+      echo "error: no live zellij session is available; start or attach one, or set FM_ZELLIJ_SESSION to a live session" >&2
+      return 1
+      ;;
+    *)
+      echo "error: multiple live zellij sessions are available; set FM_ZELLIJ_SESSION explicitly" >&2
+      return 1
+      ;;
+  esac
 }
 
 # fm_backend_zellij_home_label: readable home prefix plus a short hash of the
@@ -224,35 +248,14 @@ fm_backend_zellij_session_exists() {  # <session>
   zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
 }
 
-# fm_backend_zellij_server_ensure: create the named session in the background,
-# headless (no attached client), if it does not already exist - mirrors
-# tmux's `tmux has-session || tmux new-session -d` and herdr's server_ensure.
-# Verified: `zellij attach -b <name>` with stdin redirected from /dev/null and
-# no controlling TTY creates the session and returns promptly (it cannot
-# actually attach without a TTY, so it exits after creating); running it again
-# against an EXISTING session prints "Session already exists" and exits 1 -
-# harmless here because existence is checked first and the launch is
-# backgrounded, its exit status never inspected.
-fm_backend_zellij_server_ensure() {  # <session>
-  local session=$1 i
-  fm_backend_zellij_session_exists "$session" && return 0
-  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
-  for i in $(seq 1 20); do
-    fm_backend_zellij_session_exists "$session" && return 0
-    sleep 0.5
-  done
-  echo "error: zellij session '$session' did not come up within 10s" >&2
-  return 1
-}
-
-# fm_backend_zellij_container_ensure: the full spawn-time container-ensure
-# sequence (version gate, session). Echoes the session name (no second
-# "workspace" component - zellij has no such concept, unlike herdr).
+# fm_backend_zellij_container_ensure: version-gate and resolve one already-live
+# session. Echoes the session name (no workspace component). It deliberately
+# never starts a session: an exited configured session must not be resurrected,
+# and an unset selector must not guess among multiple captain-visible sessions.
 fm_backend_zellij_container_ensure() {
   local session
   fm_backend_zellij_version_check || return 1
-  session=$(fm_backend_zellij_session)
-  fm_backend_zellij_server_ensure "$session" || return 1
+  session=$(fm_backend_zellij_session) || return 1
   printf '%s' "$session"
 }
 

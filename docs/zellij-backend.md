@@ -18,8 +18,8 @@ Select it with local `config/backend` containing `zellij`, `FM_BACKEND=zellij` f
 It is never auto-detected.
 A spawn stops before creating a session or acquiring a worktree when Zellij or `jq` is missing or Zellij is below 0.44.
 
-Firstmate uses one shared session named `firstmate` by default.
-`FM_ZELLIJ_SESSION` can select another name for isolated verification.
+Firstmate uses an already-live Zellij session and never creates or resurrects one.
+Set `FM_ZELLIJ_SESSION` to require a specific live session. When it is unset, exactly one live session is selected; zero or multiple live sessions refuse before task-tab creation.
 Attach with:
 
 ```sh
@@ -89,6 +89,7 @@ A short viewport may expose fewer lines than requested.
 
 Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
+A failed acquisition before worker launch and metadata publication closes only that attempt's exact new tab; the process-held Treehouse slot returns with its shell, while uncertain or modified work remains untouched.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
 ## Active limits
@@ -108,6 +109,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+tests/fm-spawn-zellij-abort.test.sh
 ```
 
 The real smoke test uses a unique session and guarded deletion.

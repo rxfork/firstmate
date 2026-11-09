@@ -44,6 +44,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-github-https-lib.sh
+. "$SCRIPT_DIR/fm-github-https-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -164,19 +166,11 @@ packed_refs_lock_path() {
 # SSH origins use HTTPS plus the active gh credential for this command only;
 # other remotes keep Git's existing transport and authentication behavior.
 fetch_origin() {
-  case "$origin_url" in
-    git@github.com:*|ssh://git@github.com/*)
-      git \
-        -c credential.https://github.com.helper= \
-        -c credential.https://github.com.helper='!gh auth git-credential' \
-        -c url.https://github.com/.insteadOf=git@github.com: \
-        -c url.https://github.com/.insteadOf=ssh://git@github.com/ \
-        -C "$PROJ" fetch origin --prune --quiet
-      ;;
-    *)
-      git -C "$PROJ" fetch origin --prune --quiet
-      ;;
-  esac
+  if fm_git_origin_is_github_ssh "$origin_url"; then
+    fm_git_github_https_git -C "$PROJ" fetch origin --prune --quiet
+  else
+    git -C "$PROJ" fetch origin --prune --quiet
+  fi
 }
 
 # Run fetch_origin, tolerating an orphaned packed-refs.lock left by a killed ref

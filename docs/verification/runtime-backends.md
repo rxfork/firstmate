@@ -2247,7 +2247,7 @@ The daemon injection transport into a live composer keeps its coverage in `tests
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
-All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
+All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion. The smoke fixture starts its own isolated session before exercising the adapter; production selection only adopts an already-live session and never invokes that creation command.
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
@@ -2269,6 +2269,7 @@ The focus mitigation restored the previously active tab after `new-tab`, with th
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+tests/fm-spawn-zellij-abort.test.sh
 ```
 
 The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.

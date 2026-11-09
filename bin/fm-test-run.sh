@@ -352,7 +352,7 @@ family_for_basename() {
       printf '%s\n' secondmate
       ;;
     fm-backlog-atomicity.test.sh|\
-    fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-github-https-lib.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -433,7 +433,7 @@ family_for_basename() {
     fm-backend-rex.test.sh|fm-backend-rex-smoke.test.sh|fm-backend-rex-eventwait-smoke.test.sh)
       printf '%s\n' rex
       ;;
-    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
+    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh|fm-spawn-zellij-abort.test.sh)
       printf '%s\n' zellij
       ;;
     fm-backend-orca.test.sh)
@@ -808,6 +808,7 @@ tests/fm-fork-free-helpers.test.sh 746
 tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
+tests/fm-github-https-lib.test.sh 1000
 tests/fm-gitignore-config.test.sh 59
 tests/fm-gotmp.test.sh 1509
 tests/fm-grok-continuity-live-e2e.test.sh 46
@@ -920,6 +921,7 @@ tests/fm-spawn-dispatch-profile.test.sh 197548
 tests/fm-spawn-orca-worktree.test.sh 2400
 tests/fm-spawn-pool-base-freshen.test.sh 68652
 tests/fm-spawn-worktree-settle.test.sh 9309
+tests/fm-spawn-zellij-abort.test.sh 1500
 tests/fm-startup-memory-budget.test.sh 8086
 tests/fm-startup-network.test.sh 72106
 tests/fm-stat-shadowing.test.sh 75

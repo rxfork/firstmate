@@ -682,8 +682,8 @@ The local `config/osc7501-status` file gates the feature per home: `on` (the def
 
 ### Zellij sessions
 
-For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
-Zellij has no per-home workspace split: primary and secondmate tasks share that one session, and visible tab titles are scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
+For normal zellij operations, `FM_ZELLIJ_SESSION` requires that named session to already be live. When unset, Firstmate selects exactly one live session and refuses zero or multiple matches; it never creates or resurrects a session.
+Zellij has no per-home workspace split: primary and secondmate tasks using the selected session share its tab bar, and visible tab titles are scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 
 Use the guarded cleanup path described in [`docs/zellij-backend.md`](zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
 
@@ -1736,6 +1736,7 @@ export FM_WORKER_ENV_FORWARD='PATH TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK PI_CLIPB
 ```
 
 Selected `PATH` and `TREEHOUSE_ROOT` values also reach the interactive `treehouse get` command that runs before worker launch.
+For a GitHub SSH origin, Firstmate additionally gives only that acquisition command the active `gh auth git-credential` helper and host-scoped SSH-to-HTTPS rewrites; it requires a valid `gh auth login`, never changes the remote or global Git configuration, and clears those generated `GIT_CONFIG_*` entries before worker launch. File, HTTPS, and non-GitHub SSH remotes keep their existing transport.
 Other selected values travel in the existing owner-only launch file rather than terminal input.
 Invoker-forwarded values override destination-pane values and survive an empty `config/launch-env-allowlist`.
 T3 Code carries set selected values through its per-directory provider environment and refuses a selected name that is unset because that provider configuration cannot represent an exact unset.
@@ -3406,7 +3407,7 @@ FM_TASK_INBOX=          # internal: absolute path of the task's steering inbox (
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
-FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
+FM_ZELLIJ_SESSION=          # zellij-only: optional required live session; unset auto-selects only when exactly one session is live (docs/zellij-backend.md)
 FM_TERN_SESSION=        # tern-only: optional session NAME override for tests/smoke; default fm-<hometag> (docs/tern-backend.md)
 FM_BACKEND_TERN_CTL_TIMEOUT=5  # tern-only: seconds bounding each tern ctl call for native agent state (docs/tern-backend.md)
 FM_BACKEND_TERN_SUBMIT_POLLS=6  # tern-only: native-state samples across each Enter confirmation budget
