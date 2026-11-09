@@ -2386,6 +2386,133 @@ SH
   done
 }
 
+test_invoker_worker_environment_forwarding() {
+  local rec id out status probe pane_log launch treehouse_line treehouse_seen result expected
+  local wrapper_path actual_path root_value lavish_value nm_value
+
+  id=env-forward-set
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  probe="$CASE_DIR/probe.sh"
+  cat > "$probe" <<'SH'
+#!/bin/sh
+printf 'PATH=%s\nTREEHOUSE_ROOT=%s\nPI_SKIP_VERSION_CHECK=%s\nPI_CLIPBOARD_OSC52=%s\nLAVISH_AXI_STATE_DIR=%s\nNM_HOME=%s\nNO_MISTAKES_NO_UPDATE_CHECK=%s\nFM_WORKER_ENV_FORWARD=%s\n' \
+  "${PATH-unset}" "${TREEHOUSE_ROOT-unset}" "${PI_SKIP_VERSION_CHECK-unset}" \
+  "${PI_CLIPBOARD_OSC52-unset}" "${LAVISH_AXI_STATE_DIR-unset}" "${NM_HOME-unset}" \
+  "${NO_MISTAKES_NO_UPDATE_CHECK-unset}" "${FM_WORKER_ENV_FORWARD-unset}"
+SH
+  chmod +x "$probe"
+  pane_log="$CASE_DIR/pane.log"
+  wrapper_path="$CASE_DIR/wrapper-bin:/usr/bin:/bin"
+  actual_path="$FAKEBIN_DIR:$wrapper_path"
+  root_value="$CASE_DIR/tree root; \$(touch '$CASE_DIR/SHOULD_NOT_EXIST') 'quote'"
+  lavish_value="$CASE_DIR/lavish state"
+  nm_value="$CASE_DIR/no mistakes"
+  out=$(
+    # shellcheck disable=SC2030,SC2031 # These wrapper values deliberately exist only in the captured spawn.
+    export FM_TEST_PANE_LOG="$pane_log"
+    # shellcheck disable=SC2030,SC2031 # The worker contract is scoped to this captured spawn.
+    export FM_WORKER_ENV_FORWARD='PATH TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK PI_CLIPBOARD_OSC52 LAVISH_AXI_STATE_DIR NM_HOME NO_MISTAKES_NO_UPDATE_CHECK'
+    # shellcheck disable=SC2030,SC2031 # The synthetic wrapper PATH is scoped to this captured spawn.
+    export PATH="$wrapper_path" TREEHOUSE_ROOT="$root_value"
+    export PI_SKIP_VERSION_CHECK=1 PI_CLIPBOARD_OSC52=1
+    export LAVISH_AXI_STATE_DIR="$lavish_value" NM_HOME="$nm_value" NO_MISTAKES_NO_UPDATE_CHECK=1
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'"
+  )
+  status=$?
+  expect_code 0 "$status" "invoker-forwarded worker environment spawn should succeed: $out"
+  treehouse_line=$(grep -m1 'treehouse get' "$pane_log")
+  assert_contains "$treehouse_line" "export TREEHOUSE_ROOT=" \
+    "treehouse allocation did not receive the selected current TREEHOUSE_ROOT"
+  assert_contains "$treehouse_line" "export PATH=" \
+    "treehouse allocation did not receive the selected current PATH"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/bin/sh
+printf 'root=%s\npath=%s\n' "${TREEHOUSE_ROOT-unset}" "${PATH-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+  treehouse_seen=$(env -i PATH=/usr/bin:/bin TREEHOUSE_ROOT=/wrong/root /bin/sh -c "$treehouse_line")
+  expected=$(printf 'root=%s\npath=%s' "$root_value" "$actual_path")
+  [ "$treehouse_seen" = "$expected" ] \
+    || fail "treehouse allocation did not observe the invoking process environment"$'\n'"expected: $expected"$'\n'"actual:   $treehouse_seen"
+  assert_absent "$CASE_DIR/SHOULD_NOT_EXIST" "shell syntax inside a forwarded value executed"
+
+  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH=/wrong/path TERM=xterm TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+    TREEHOUSE_ROOT=/wrong/root PI_SKIP_VERSION_CHECK=wrong PI_CLIPBOARD_OSC52=wrong \
+    LAVISH_AXI_STATE_DIR=/wrong/lavish NM_HOME=/wrong/nm NO_MISTAKES_NO_UPDATE_CHECK=wrong \
+    FM_WORKER_ENV_FORWARD=stale /bin/sh -c "$launch") \
+    || fail "invoker-forwarded launch failed"
+  expected=$(printf 'PATH=%s\nTREEHOUSE_ROOT=%s\nPI_SKIP_VERSION_CHECK=1\nPI_CLIPBOARD_OSC52=1\nLAVISH_AXI_STATE_DIR=%s\nNM_HOME=%s\nNO_MISTAKES_NO_UPDATE_CHECK=1\nFM_WORKER_ENV_FORWARD=unset' \
+    "$actual_path" "$root_value" "$lavish_value" "$nm_value")
+  [ "$result" = "$expected" ] \
+    || fail "worker did not receive the invoking process environment through an empty allowlist"$'\n'"expected: $expected"$'\n'"actual:   $result"
+  assert_absent "$CASE_DIR/SHOULD_NOT_EXIST" "worker launch evaluated shell syntax inside a forwarded value"
+
+  id=env-forward-unset
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  probe="$CASE_DIR/probe.sh"
+  cat > "$probe" <<'SH'
+#!/bin/sh
+printf 'TREEHOUSE_ROOT=%s\nPI_SKIP_VERSION_CHECK=%s\nFM_WORKER_ENV_FORWARD=%s\n' \
+  "${TREEHOUSE_ROOT-unset}" "${PI_SKIP_VERSION_CHECK-unset}" "${FM_WORKER_ENV_FORWARD-unset}"
+SH
+  chmod +x "$probe"
+  pane_log="$CASE_DIR/pane.log"
+  out=$(
+    unset TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK
+    # shellcheck disable=SC2030,SC2031 # These wrapper values deliberately exist only in the captured spawn.
+    export FM_TEST_PANE_LOG="$pane_log"
+    # shellcheck disable=SC2030,SC2031 # The worker contract is scoped to this captured spawn.
+    export FM_WORKER_ENV_FORWARD='TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK'
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'"
+  )
+  status=$?
+  expect_code 0 "$status" "unset invoker-forwarded worker environment spawn should succeed: $out"
+  treehouse_line=$(grep -m1 'treehouse get' "$pane_log")
+  assert_contains "$treehouse_line" 'unset TREEHOUSE_ROOT; treehouse get' \
+    "treehouse allocation did not clear a stale TREEHOUSE_ROOT when the invoker left it unset"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/bin/sh
+printf 'root=%s\n' "${TREEHOUSE_ROOT-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+  treehouse_seen=$(env -i PATH="$FAKEBIN_DIR:/usr/bin:/bin" TREEHOUSE_ROOT=/wrong/root /bin/sh -c "$treehouse_line")
+  assert_contains "$treehouse_seen" 'root=unset' \
+    "treehouse allocation retained the stale daemon TREEHOUSE_ROOT"
+  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+    TREEHOUSE_ROOT=/wrong/root PI_SKIP_VERSION_CHECK=wrong FM_WORKER_ENV_FORWARD=stale /bin/sh -c "$launch") \
+    || fail "unset invoker-forwarded launch failed"
+  expected=$'TREEHOUSE_ROOT=unset\nPI_SKIP_VERSION_CHECK=unset\nFM_WORKER_ENV_FORWARD=unset'
+  [ "$result" = "$expected" ] \
+    || fail "worker retained stale daemon values for names unset in the invoking process"$'\n'"expected: $expected"$'\n'"actual:   $result"
+
+  pass "FM_WORKER_ENV_FORWARD copies selected invoker values and clears selected stale values"
+}
+
+test_invoker_worker_environment_invalid_names_refuse() {
+  local rec id value out status
+  id=env-forward-invalid
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  for value in 'BAD-NAME' 'FM_HOME' 'ZELLIJ_SOCKET_DIR'; do
+    out=$(FM_WORKER_ENV_FORWARD="$value" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "invalid or reserved forwarded name must refuse: $value"
+    assert_contains "$out" 'FM_WORKER_ENV_FORWARD' "refusal did not identify the wrapper contract"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid forwarded name delivered a launch command: $value"
+    [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "invalid forwarded name published task metadata: $value"
+  done
+  pass "FM_WORKER_ENV_FORWARD refuses malformed and Firstmate-owned names"
+}
+
 test_launch_environment_invalid_config_refuses() {
   local rec id bad out status
   id=env-invalid
@@ -2456,6 +2583,7 @@ test_launch_environment_inherited_by_secondmate() {
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
 SH
   chmod +x "$FAKEBIN_DIR/codex"
+  # shellcheck disable=SC2031 # The earlier synthetic PATH assignment was confined to its captured spawn.
   result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
     FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
     /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
@@ -2554,6 +2682,8 @@ SH
 }
 
 test_launch_environment_allowlist
+test_invoker_worker_environment_forwarding
+test_invoker_worker_environment_invalid_names_refuse
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
@@ -2600,6 +2730,7 @@ SH
     envelope="$CASE_DIR/prompt-envelope"
     encoded="$CASE_DIR/encoded-prompt"
     prompt="$CASE_DIR/prompt"
+    # shellcheck disable=SC2031 # The earlier synthetic PATH assignment was confined to its captured spawn.
     FM_ROLE_PROMPT="$envelope" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
     sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
     "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" ||

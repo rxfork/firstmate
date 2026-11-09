@@ -408,6 +408,21 @@
 #   prevents equal task ids in different Firstmate homes from sharing a file.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
+# Invoker-selected worker environment (FM_WORKER_ENV_FORWARD):
+#   A wrapper may export a whitespace-separated list of environment variable
+#   names whose values fm-spawn must copy from THIS process into the worker.
+#   Names only cross this interface: values are snapshotted here, shell-quoted,
+#   and delivered through the existing private launch file. A name unset here
+#   is explicitly unset in a pane worker, so a stale terminal-daemon value
+#   cannot win. PATH and TREEHOUSE_ROOT are also applied before the interactive
+#   `treehouse get`, because allocation happens before the worker launch file is
+#   sourced. The resolved FM_HOME and Firstmate's task/routing assignments keep
+#   their existing dedicated channels; FM_*, backend identity/routing names,
+#   GIT_CONFIG_*, GOTMPDIR, COMPACT_ADVISER_DISABLE, TRACEPARENT, and
+#   LAVISH_AXI_HOST are reserved and refused in this list. T3 Code copies set
+#   names into its per-directory provider environment and refuses an unset name,
+#   because that provider config cannot represent an exact unset. With the
+#   variable absent or empty, launch behavior is unchanged.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every supported command-line launch (ship, scout, secondmate, raw
@@ -828,6 +843,37 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     exit 1
   fi
 fi
+WORKER_ENV_FORWARD_NAMES=
+if [ -n "${FM_WORKER_ENV_FORWARD:-}" ]; then
+  while IFS= read -r worker_env_name; do
+    [ -n "$worker_env_name" ] || continue
+    case "$worker_env_name" in
+      [0-9]*|*[!A-Za-z0-9_]*)
+        echo "error: FM_WORKER_ENV_FORWARD must contain whitespace-separated POSIX environment variable names, not '$worker_env_name'" >&2
+        exit 1
+        ;;
+    esac
+    case "$worker_env_name" in
+      FM_*|GIT_CONFIG_*|TMUX|TMUX_PANE|HERDR_*|CMUX_*|ZELLIJ|ZELLIJ_*|REX_*|TERN_*|HC_*|GOTMPDIR|COMPACT_ADVISER_DISABLE|TRACEPARENT|LAVISH_AXI_HOST)
+        echo "error: FM_WORKER_ENV_FORWARD cannot transfer Firstmate-owned or backend-routing variable '$worker_env_name'" >&2
+        exit 1
+        ;;
+    esac
+    case $'\n'"$WORKER_ENV_FORWARD_NAMES"$'\n' in
+      *$'\n'"$worker_env_name"$'\n'*) ;;
+      *) WORKER_ENV_FORWARD_NAMES="${WORKER_ENV_FORWARD_NAMES:+$WORKER_ENV_FORWARD_NAMES$'\n'}$worker_env_name" ;;
+    esac
+  done < <(printf '%s\n' "$FM_WORKER_ENV_FORWARD" | tr '[:space:]' '\n')
+fi
+worker_env_forward_has() { # <name>
+  case $'\n'"$WORKER_ENV_FORWARD_NAMES"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+worker_env_forward_is_set() { # <validated-name>
+  eval '[ "${'"$1"'+x}" = x ]'
+}
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
@@ -2407,6 +2453,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fm_backend_runtime_check "$BACKEND" || exit 1
   if [ "$BACKEND" = rex ]; then
     fm_backend_rex_local_server_ensure || exit 1
+  fi
+  if [ "$BACKEND" = t3code ] && [ -n "$WORKER_ENV_FORWARD_NAMES" ]; then
+    while IFS= read -r worker_env_name; do
+      [ -n "$worker_env_name" ] || continue
+      worker_env_forward_is_set "$worker_env_name" || {
+        echo "error: backend=t3code cannot preserve requested unset worker variable '$worker_env_name'; set it explicitly or omit it from FM_WORKER_ENV_FORWARD" >&2
+        exit 1
+      }
+    done <<< "$WORKER_ENV_FORWARD_NAMES"
   fi
   if [ "$BACKEND" = orca ]; then
     ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
@@ -6084,7 +6139,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   elif [ "$BACKEND" = herdr ]; then
     spawn_lease_herdr_slot
   else
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    treehouse_command='treehouse get'
+    for worker_env_name in PATH TREEHOUSE_ROOT; do
+      worker_env_forward_has "$worker_env_name" || continue
+      if worker_env_forward_is_set "$worker_env_name"; then
+        treehouse_command="export $worker_env_name=$(shell_quote "${!worker_env_name}"); $treehouse_command"
+      else
+        treehouse_command="unset $worker_env_name; $treehouse_command"
+      fi
+    done
+    spawn_send_text_line "$WT_TARGET" "$treehouse_command"
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -7808,6 +7872,22 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+# A launcher-selected worker contract comes from this fm-spawn process, never
+# from the destination pane or its long-lived daemon. Keep it inside the private
+# launch file so explicitly forwarded credentials do not appear in terminal
+# input. These assignments intentionally sit inside any env -i wrapper below;
+# they therefore override destination values and survive an empty allowlist.
+if [ "$BACKEND" != t3code ] && [ -n "$WORKER_ENV_FORWARD_NAMES" ]; then
+  LAUNCH="unset FM_WORKER_ENV_FORWARD; $LAUNCH"
+  while IFS= read -r worker_env_name; do
+    [ -n "$worker_env_name" ] || continue
+    if worker_env_forward_is_set "$worker_env_name"; then
+      LAUNCH="export $worker_env_name=$(shell_quote "${!worker_env_name}"); $LAUNCH"
+    else
+      LAUNCH="unset $worker_env_name; $LAUNCH"
+    fi
+  done <<< "$WORKER_ENV_FORWARD_NAMES"
+fi
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
@@ -7842,6 +7922,12 @@ if [ "$BACKEND" = t3code ]; then
   # record exists, the same delivered-implies-recorded invariant the pane path
   # keeps by unsetting it when the record fails.
   T3CODE_ENV=("GOTMPDIR=$TASK_TMP/gotmp" COMPACT_ADVISER_DISABLE=1 "FM_TASK_INBOX=$STATE_REAL/$ID.inbox")
+  if [ -n "$WORKER_ENV_FORWARD_NAMES" ]; then
+    while IFS= read -r worker_env_name; do
+      [ -n "$worker_env_name" ] || continue
+      T3CODE_ENV+=("$worker_env_name=${!worker_env_name}")
+    done <<< "$WORKER_ENV_FORWARD_NAMES"
+  fi
   if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
     T3CODE_ENV+=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=$GIT_HOOKS_DIR")
   fi

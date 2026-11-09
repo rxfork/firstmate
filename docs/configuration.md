@@ -1721,6 +1721,26 @@ The flag is read only for ship and scout spawns, secondmate charters never take 
 
 ## Worker launch environment (config/launch-env-allowlist)
 
+### Invoker forwarding (FM_WORKER_ENV_FORWARD)
+
+A launcher wrapper can set `FM_WORKER_ENV_FORWARD` to a whitespace-separated list of environment variable names that workers should receive from the current `fm-spawn.sh` process.
+The list carries names only, while Firstmate reads each selected value from its own environment.
+Set and empty values are copied exactly, and an unset selected name is explicitly unset in pane workers so a stale terminal-daemon value cannot replace it.
+Firstmate-owned and backend-routing names are refused because their existing launch channels remain authoritative.
+`bin/fm-spawn.sh`'s header owns the exact reserved-name set and parsing mechanics.
+
+For example:
+
+```sh
+export FM_WORKER_ENV_FORWARD='PATH TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK PI_CLIPBOARD_OSC52 LAVISH_AXI_STATE_DIR NM_HOME NO_MISTAKES_NO_UPDATE_CHECK'
+```
+
+Selected `PATH` and `TREEHOUSE_ROOT` values also reach the interactive `treehouse get` command that runs before worker launch.
+Other selected values travel in the existing owner-only launch file rather than terminal input.
+Invoker-forwarded values override destination-pane values and survive an empty `config/launch-env-allowlist`.
+T3 Code carries set selected values through its per-directory provider environment and refuses a selected name that is unset because that provider configuration cannot represent an exact unset.
+When `FM_WORKER_ENV_FORWARD` is absent or empty, launch behavior is unchanged.
+
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 T3 Code starts the provider from the server's environment and cannot apply this command boundary, so `backend=t3code` refuses when the file exists; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
@@ -3378,6 +3398,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity readers, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex/t3code/tern support ship/scout spawns, codex-app is not accepted
+FM_WORKER_ENV_FORWARD=  # whitespace-separated variable names a launcher explicitly copies from the current fm-spawn process into workers; see "Worker launch environment"
 FM_T3CODE_ORIGIN=       # optional T3 Code server origin for bin/fm-t3-mcp.mjs login; the default is read from ~/.t3/userdata/server-runtime.json
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh delivers to ship and scout environments, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
