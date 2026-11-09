@@ -331,7 +331,7 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 #
 # Echoes "<tab_id> <pane_id>" on success.
 fm_backend_zellij_create_task() {  # <session> <label> <cwd>
-  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id
+  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id shell i
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
@@ -350,7 +350,21 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   esac
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
-    echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
+    shell=${SHELL:-/bin/sh}
+    case "$shell" in /*) [ -x "$shell" ] || shell=/bin/sh ;; *) shell=/bin/sh ;; esac
+    fm_backend_zellij_cli "$session" action new-pane --tab-id "$tab_id" --cwd "$cwd" -- "$shell" -i >/dev/null 2>&1 || true
+    for i in 1 2 3 4 5; do
+      pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
+      [ -n "$pane_id" ] && break
+      sleep 0.1
+    done
+  fi
+  if [ -z "$pane_id" ]; then
+    fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
+    if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
+      fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
+    fi
+    echo "error: could not create a terminal pane for zellij tab $tab_id (session '$session')" >&2
     return 1
   fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
