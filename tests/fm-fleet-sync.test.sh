@@ -27,6 +27,11 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# GitHub SSH origins are fetched through HTTPS with command-local gh credentials,
+# without changing the remote or persistent Git configuration. Both common SSH
+# URL forms and every packed-refs retry use that transport; non-GitHub remotes
+# keep their existing transport, and gh authentication failures remain visible.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -215,6 +220,44 @@ if [ "$is_fetch" = 1 ]; then
     rm -f "$lock"
     exit 1
   fi
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+# git shim: record every fetch invocation, then either fetch the local fixture,
+# simulate a gh credential failure, or fail once with the packed-refs signature.
+git_capture_fetch_transport() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+dir=; is_fetch=0
+for a in "$@"; do [ "$a" = fetch ] && is_fetch=1; done
+prev=
+for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
+if [ "$is_fetch" = 1 ]; then
+  n=$(cat "${FLEET_TEST_FETCH_COUNTER:?}" 2>/dev/null || echo 0); n=$(( n + 1 ))
+  printf '%s\n' "$n" > "$FLEET_TEST_FETCH_COUNTER"
+  {
+    printf 'fetch %s' "$n"
+    for a in "$@"; do printf ' <%s>' "$a"; done
+    printf '\n'
+  } >> "${FLEET_TEST_FETCH_RECORD:?}"
+  case "${FLEET_TEST_FETCH_MODE:-success}" in
+    auth-fail)
+      echo "fatal: gh auth git-credential failed for github.com" >&2
+      exit 128
+      ;;
+    packed-once)
+      if [ "$n" -eq 1 ]; then
+        echo "error: could not update reference refs/remotes/origin/main: Unable to create '$dir/.git/packed-refs.lock': File exists." >&2
+        exit 1
+      fi
+      ;;
+  esac
+  exec "$real" -C "$dir" fetch "${FLEET_TEST_FETCH_REMOTE:?}" \
+    '+refs/heads/*:refs/remotes/origin/*' --prune --quiet
 fi
 exec "$real" "$@"
 SH
@@ -531,6 +574,148 @@ test_bootstrap_relays_recovered_and_stuck() {
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
+# --- GitHub SSH transport tests ---------------------------------------------
+
+assert_github_ssh_transport() {
+  local name=$1 origin=$2 home fakebin clone local_remote before_origin out err record counter record_text
+  home=$(new_home)
+  fakebin="$home/fb-$name"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" "$name")
+  advance_origin "$home" "$name" C1
+  local_remote=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote set-url origin "$origin"
+  before_origin=$(git -C "$clone" remote get-url origin)
+  git_capture_fetch_transport "$fakebin"
+  out="$home/out-$name"; err="$home/err-$name"
+  record="$home/fetch-$name"; : > "$record"
+  counter="$home/fetch-count-$name"; : > "$counter"
+
+  FLEET_TEST_FETCH_REMOTE="$local_remote" \
+  FLEET_TEST_FETCH_RECORD="$record" \
+  FLEET_TEST_FETCH_COUNTER="$counter" \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" "$name"
+
+  assert_contains "$(cat "$out")" "$name: synced" "$name: GitHub SSH origin did not sync"
+  record_text=$(cat "$record")
+  assert_contains "$record_text" "<credential.https://github.com.helper=>" \
+    "$name: command did not clear inherited GitHub credential helpers"
+  assert_contains "$record_text" "<credential.https://github.com.helper=!gh auth git-credential>" \
+    "$name: command did not select the gh credential helper"
+  assert_contains "$record_text" "<url.https://github.com/.insteadOf=git@github.com:>" \
+    "$name: command did not rewrite scp-style GitHub SSH URLs"
+  assert_contains "$record_text" "<url.https://github.com/.insteadOf=ssh://git@github.com/>" \
+    "$name: command did not rewrite URL-style GitHub SSH URLs"
+  [ "$(git -C "$clone" remote get-url origin)" = "$before_origin" ] \
+    || fail "$name: origin changed during fetch"
+  if git -C "$clone" config --local --get-all credential.https://github.com.helper >/dev/null; then
+    fail "$name: credential helper persisted in local Git configuration"
+  fi
+  if git -C "$clone" config --local --get-all url.https://github.com/.insteadOf >/dev/null; then
+    fail "$name: URL rewrite persisted in local Git configuration"
+  fi
+}
+
+test_github_scp_ssh_origin_uses_command_local_gh_https() {
+  assert_github_ssh_transport github-scp git@github.com:example/project.git
+  pass "scp-style GitHub SSH origin fetches through command-local gh HTTPS without mutation"
+}
+
+test_github_url_ssh_origin_uses_command_local_gh_https() {
+  assert_github_ssh_transport github-url ssh://git@github.com/example/project.git
+  pass "URL-style GitHub SSH origin fetches through command-local gh HTTPS without mutation"
+}
+
+test_non_github_ssh_origin_keeps_existing_transport() {
+  local home fakebin clone local_remote origin out err record counter record_text
+  home=$(new_home)
+  fakebin="$home/fb-nongithub"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" nongithub)
+  advance_origin "$home" nongithub C1
+  local_remote=$(git -C "$clone" remote get-url origin)
+  origin=ssh://git@example.com/example/project.git
+  git -C "$clone" remote set-url origin "$origin"
+  git_capture_fetch_transport "$fakebin"
+  out="$home/out-nongithub"; err="$home/err-nongithub"
+  record="$home/fetch-nongithub"; : > "$record"
+  counter="$home/fetch-count-nongithub"; : > "$counter"
+
+  FLEET_TEST_FETCH_REMOTE="$local_remote" \
+  FLEET_TEST_FETCH_RECORD="$record" \
+  FLEET_TEST_FETCH_COUNTER="$counter" \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" nongithub
+
+  assert_contains "$(cat "$out")" "nongithub: synced" "non-GitHub SSH origin did not keep the ordinary fetch path"
+  record_text=$(cat "$record")
+  assert_not_contains "$record_text" "credential.https://github.com.helper" \
+    "non-GitHub SSH origin received GitHub credentials"
+  assert_not_contains "$record_text" "url.https://github.com/.insteadOf" \
+    "non-GitHub SSH origin was rewritten to GitHub"
+  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+    || fail "non-GitHub SSH origin changed during fetch"
+  pass "non-GitHub SSH origin keeps its existing transport and receives no GitHub credentials"
+}
+
+test_github_gh_auth_failure_is_visible_without_fallback() {
+  local home fakebin clone origin out err record counter
+  home=$(new_home)
+  fakebin="$home/fb-gh-fail"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" gh-fail)
+  origin=git@github.com:example/project.git
+  git -C "$clone" remote set-url origin "$origin"
+  git_capture_fetch_transport "$fakebin"
+  out="$home/out-gh-fail"; err="$home/err-gh-fail"
+  record="$home/fetch-gh-fail"; : > "$record"
+  counter="$home/fetch-count-gh-fail"; : > "$counter"
+
+  FLEET_TEST_FETCH_MODE=auth-fail \
+  FLEET_TEST_FETCH_REMOTE=unused \
+  FLEET_TEST_FETCH_RECORD="$record" \
+  FLEET_TEST_FETCH_COUNTER="$counter" \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" gh-fail
+
+  assert_contains "$(cat "$out")" "gh-fail: skipped: fetch failed: fatal: gh auth git-credential failed for github.com" \
+    "gh authentication failure was not reported as the fetch failure"
+  [ "$(wc -l < "$record")" -eq 1 ] || fail "gh authentication failure retried or fell back to another fetch"
+  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+    || fail "gh authentication failure changed origin"
+  pass "gh authentication failure is visible and does not fall back to SSH"
+}
+
+test_github_packed_refs_retry_keeps_command_local_gh_https() {
+  local home fakebin clone local_remote origin out err record counter
+  home=$(new_home)
+  fakebin="$home/fb-gh-retry"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_pair "$home" gh-retry)
+  advance_origin "$home" gh-retry C1
+  local_remote=$(git -C "$clone" remote get-url origin)
+  origin=git@github.com:example/project.git
+  git -C "$clone" remote set-url origin "$origin"
+  git_capture_fetch_transport "$fakebin"
+  out="$home/out-gh-retry"; err="$home/err-gh-retry"
+  record="$home/fetch-gh-retry"; : > "$record"
+  counter="$home/fetch-count-gh-retry"; : > "$counter"
+
+  FLEET_TEST_FETCH_MODE=packed-once \
+  FLEET_TEST_FETCH_REMOTE="$local_remote" \
+  FLEET_TEST_FETCH_RECORD="$record" \
+  FLEET_TEST_FETCH_COUNTER="$counter" \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" gh-retry
+
+  assert_contains "$(cat "$out")" "gh-retry: synced" "GitHub SSH fetch did not succeed after packed-refs retry"
+  [ "$(wc -l < "$record")" -eq 2 ] || fail "expected exactly two GitHub fetch attempts"
+  [ "$(grep -Fc '<credential.https://github.com.helper=>' "$record")" -eq 2 ] \
+    || fail "not every packed-refs retry cleared inherited credential helpers"
+  [ "$(grep -Fc '<credential.https://github.com.helper=!gh auth git-credential>' "$record")" -eq 2 ] \
+    || fail "not every packed-refs retry used the gh credential helper"
+  [ "$(grep -Fc '<url.https://github.com/.insteadOf=git@github.com:>' "$record")" -eq 2 ] \
+    || fail "not every packed-refs retry rewrote the GitHub SSH transport"
+  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+    || fail "packed-refs retry changed origin"
+  pass "every packed-refs retry keeps the same command-local gh HTTPS transport"
+}
+
 # --- packed-refs.lock guard tests -------------------------------------------
 
 test_orphaned_stale_packed_refs_lock_recovers() {
@@ -765,6 +950,11 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
+test_github_scp_ssh_origin_uses_command_local_gh_https
+test_github_url_ssh_origin_uses_command_local_gh_https
+test_non_github_ssh_origin_keeps_existing_transport
+test_github_gh_auth_failure_is_visible_without_fallback
+test_github_packed_refs_retry_keeps_command_local_gh_https
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
