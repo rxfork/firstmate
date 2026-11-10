@@ -136,7 +136,15 @@ FM_BACKEND_ZELLIJ_MIN_MINOR=44
 # selected and later recorded in task metadata. Zero or multiple live sessions
 # refuse rather than creating or guessing.
 fm_backend_zellij_live_sessions() {
-  zellij list-sessions --short --no-formatting 2>/dev/null | awk 'NF == 1 { print }'
+  # `--short` strips the EXITED marker as well as the live-session metadata, so
+  # it cannot distinguish a resumable stale name from a running session.
+  zellij list-sessions --no-formatting 2>/dev/null | awk '
+    {
+      upper = toupper($0)
+      if (index(upper, "(EXITED") > 0 || index(upper, "[EXITED") > 0) next
+      if (NF == 1 || index(upper, "[CREATED") > 0) print $1
+    }
+  '
 }
 
 fm_backend_zellij_session() {
@@ -245,7 +253,7 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
 # orphan whatever the caller actually meant to reach). Every op below calls
 # this first and fails rather than guessing.
 fm_backend_zellij_session_exists() {  # <session>
-  zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
+  fm_backend_zellij_live_sessions | grep -qxF "$1"
 }
 
 # fm_backend_zellij_container_ensure: version-gate and resolve one already-live
@@ -684,7 +692,7 @@ fm_backend_zellij_list_live() {  # <session>
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")
-  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
+  sessions=$(fm_backend_zellij_live_sessions)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)

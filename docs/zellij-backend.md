@@ -20,6 +20,7 @@ A spawn stops before creating a session or acquiring a worktree when Zellij or `
 
 Firstmate uses an already-live Zellij session and never creates or resurrects one.
 Set `FM_ZELLIJ_SESSION` to require a specific live session. When it is unset, exactly one live session is selected; zero or multiple live sessions refuse before task-tab creation.
+Liveness comes from the status-bearing normal `list-sessions --no-formatting` output. Firstmate deliberately does not use `--short`, because Zellij strips the `EXITED` marker there and makes resumable stale sessions look live.
 Attach with:
 
 ```sh

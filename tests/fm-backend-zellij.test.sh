@@ -25,8 +25,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-zellij-tests)
 # success on the real CLI). `--version` and `list-sessions` are handled
 # specially (not call-counted) since fm_backend_zellij_session_exists calls
 # list-sessions on every op as a passive liveness probe and must not consume
-# the ordered response queue - its canned membership is controlled by
-# FM_ZELLIJ_SESSION_LIST instead.
+# the ordered response queue - its status-bearing normal output is controlled
+# by FM_ZELLIJ_SESSION_LIST, while FM_ZELLIJ_SESSION_LIST_SHORT can model the
+# names-only output that hides exited state.
 make_zellij_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -47,6 +48,12 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = list-sessions ]; then
+  for arg in "$@"; do
+    if [ "$arg" = --short ]; then
+      printf '%s\n' "${FM_ZELLIJ_SESSION_LIST_SHORT:-${FM_ZELLIJ_SESSION_LIST:-}}"
+      exit 0
+    fi
+  done
   printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
   exit 0
 fi
@@ -199,9 +206,10 @@ test_session_auto_selects_exactly_one_live_session() {
   dir="$TMP_ROOT/session-auto-one"; mkdir -p "$dir/responses"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST=$'old-session [EXITED]\nonly-live' \
+    FM_ZELLIJ_SESSION_LIST=$'old-session (EXITED - attach to resurrect)\nonly-live [Created 1m ago]\nolder-session (EXITED - attach to resurrect)' \
+    FM_ZELLIJ_SESSION_LIST_SHORT=$'old-session\nonly-live\nolder-session' \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session' "$ROOT" )
-  [ "$out" = only-live ] || fail "single live session should be selected, got '$out'"
+  [ "$out" = only-live ] || fail "single live session should be selected from the status-bearing listing, got '$out'"
   pass "fm_backend_zellij_session: auto-selects exactly one live session and ignores exited entries"
 }
 
@@ -221,7 +229,8 @@ test_session_refuses_exited_override() {
   dir="$TMP_ROOT/session-override-exited"; mkdir -p "$dir/responses"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST=$'firstmate-nono [EXITED]\nimplacable-mountain' FM_ZELLIJ_SESSION=firstmate-nono \
+    FM_ZELLIJ_SESSION_LIST=$'firstmate-nono (EXITED - attach to resurrect)\nimplacable-mountain [Created 1m ago]' \
+    FM_ZELLIJ_SESSION_LIST_SHORT=$'firstmate-nono\nimplacable-mountain' FM_ZELLIJ_SESSION=firstmate-nono \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_container_ensure' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "container_ensure must refuse an exited configured session"

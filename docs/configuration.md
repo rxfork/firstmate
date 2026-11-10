@@ -1736,7 +1736,7 @@ export FM_WORKER_ENV_FORWARD='PATH TREEHOUSE_ROOT PI_SKIP_VERSION_CHECK PI_CLIPB
 ```
 
 Selected `PATH` and `TREEHOUSE_ROOT` values also reach the interactive `treehouse get` command that runs before worker launch.
-For a GitHub SSH origin, Firstmate additionally gives only that acquisition command the active `gh auth git-credential` helper and host-scoped SSH-to-HTTPS rewrites; it requires a valid `gh auth login`, never changes the remote or global Git configuration, and clears those generated `GIT_CONFIG_*` entries before worker launch. File, HTTPS, and non-GitHub SSH remotes keep their existing transport.
+For a GitHub SSH origin, Firstmate gives Treehouse acquisition and every origin-contacting base-refresh command the active `gh auth git-credential` helper and host-scoped SSH-to-HTTPS rewrites; it requires a valid `gh auth login`, never changes the remote or global Git configuration, and clears the acquisition shell's generated `GIT_CONFIG_*` entries before worker launch. File, HTTPS, and non-GitHub SSH remotes keep their existing transport.
 Other selected values travel in the existing owner-only launch file rather than terminal input.
 Invoker-forwarded values override destination-pane values and survive an empty `config/launch-env-allowlist`.
 T3 Code carries set selected values through its per-directory provider environment and refuses a selected name that is unset because that provider configuration cannot represent an exact unset.

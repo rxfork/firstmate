@@ -2402,7 +2402,10 @@ test_treehouse_github_ssh_uses_scoped_https_transport() {
   cat > "$FAKEBIN_DIR/git" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *' remote set-head origin --auto') exit 0 ;;
+  *' remote set-head origin --auto')
+    printf '%s\n' "\$*" >> "\${FM_TEST_GIT_LOG:?}"
+    exit 0
+    ;;
 esac
 for arg in "\$@"; do
   if [ "\$arg" = fetch ]; then
@@ -2429,9 +2432,9 @@ SH
     "treehouse acquisition did not receive the URL-style rewrite"
   assert_contains "$(cat "$pane_log")" 'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0' \
     "treehouse acquisition policy was not cleared from the pane before worker launch"
-  [ "$(wc -l < "$git_log")" -eq 2 ] || fail "freshening the acquired worktree should perform exactly two scoped fetches"
-  [ "$(grep -Fc 'credential.https://github.com.helper=!gh auth git-credential' "$git_log")" -eq 2 ] \
-    || fail "not every post-acquisition fetch used the gh credential helper"
+  [ "$(wc -l < "$git_log")" -eq 3 ] || fail "freshening the acquired worktree should perform two fetches and one remote-head discovery"
+  [ "$(grep -Fc 'credential.https://github.com.helper=!gh auth git-credential' "$git_log")" -eq 3 ] \
+    || fail "not every post-acquisition origin contact used the gh credential helper"
   [ "$(git -C "$PROJ_DIR" remote get-url origin)" = "$origin" ] \
     || fail "GitHub HTTPS transport changed the configured origin"
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")

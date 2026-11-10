@@ -2252,7 +2252,7 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Headless session | `zellij attach -b <name>` without a TTY | Created a persistent background session and returned. |
-| Session list | `zellij list-sessions --short --no-formatting` | Returned one plain name per line without starting a session. |
+| Session list | `zellij list-sessions --no-formatting` | Preserved the `EXITED` marker needed to exclude resumable stale sessions without starting one; `--short` returned names only and is therefore not a liveness source. |
 | Create tab | `zellij action new-tab --cwd <dir> --name <title>` | Returned a numeric tab id and focused the new tab when a client was attached. |
 | Pane discovery | `zellij action list-panes --json` | Included terminal pane id, tab id, plugin flag, and top-level `pane_cwd`. |
 | Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
