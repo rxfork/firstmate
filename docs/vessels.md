@@ -1,13 +1,19 @@
 # Local vessels
 
-A [vessel](../GLOSSARY.md) is the working environment at `<anchor>/.firstmate`, distinct from a ship task.
-The anchor is an existing physical directory and the harbor is the local Linux host.
-This interface supports local anchoring and starting work, not moving between harbors.
+This interface supports local Linux anchoring and starting work, not moving between harbors.
+
+## Terms used here
+
+- **Vessel**: the portable Firstmate working environment at `<anchor>/.firstmate`, including its operational state and working repositories.
+- **Anchor**: the physical filesystem directory where the vessel resides.
+- **Harbor**: the host where the vessel resides, not a TCP port.
+- **Ship task**: an implementation task assigned to a worker, not the portable environment.
 
 ## Local setup
 
 A caller supplies `FM_HOME=<anchor>/.firstmate`, explicitly selects `FM_BACKEND=tmux` and supplies the directory settings listed in `bin/fm-anchor.sh`.
-The personal dotfiles launcher supplies Pi/tmux/Nono arguments and its own environment defaults; shared core supplies no personal harness flags or worker forwarding list.
+The personal dotfiles launcher starts Pi under Nono directly in the current terminal pane and selects tmux for workers only.
+It supplies its own environment defaults; shared core supplies no personal harness flags or worker forwarding list.
 Existing ordinary Firstmate home and backend selection remain unchanged.
 
 ```sh
@@ -38,6 +44,6 @@ Stopping work is manual; transfer and automated raising of the anchor are not im
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The caller's `just check-firstmate` tests its runtime policy and, when tmux is installed, its native command parser without opening panes.
+The caller's `just check-firstmate` tests its runtime policy, direct primary Pi launch and literal argument preservation without opening worker panes.
 Set `FIRSTMATE_TEST_CORE` to this checkout's `bin/fm-anchor.sh` while running those caller tests to exercise the real caller/core boundary.
-Interactive Pi/tmux/Nono startup must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.
+Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

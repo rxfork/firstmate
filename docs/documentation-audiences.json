@@ -126,10 +126,6 @@
   ],
   "surfaces": [
     {
-      "path": "GLOSSARY.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/vessels.md",
       "audience": "operator-current"
     },

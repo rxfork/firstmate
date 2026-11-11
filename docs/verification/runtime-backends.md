@@ -8,10 +8,10 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Local vessel anchoring
 
-Verified on 2026-11-11 on Linux with tmux 3.8.
+Verified on 2026-11-11 on Linux.
 `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed five executable cases for initialization, physical paths, recorded options, launch argv/status, startup gating and the short anchor lock.
-In the caller repository, `FIRSTMATE_TEST_CORE=/path/to/firstmate/bin/fm-anchor.sh just check-firstmate` passed seven cases, including the real core gate and the native tmux command parser's terminal-semicolon handling in private HOME/XDG/socket state.
-The parser proof creates no pane or PTY and does not run Pi/Nono interactively.
+In the caller repository, `FIRSTMATE_TEST_CORE=/path/to/firstmate/bin/fm-anchor.sh just check-firstmate` passed seven cases (`Ran 7 tests`, `OK`), including the real core gate and a direct primary Pi command with unchanged semicolons, backslashes and empty arguments.
+These tests inspect the executable caller/core boundary without opening a tmux pane or running Pi/Nono interactively.
 These results do not prove all writers have stopped; [local vessels](../vessels.md) owns the supported scope.
 
 ## Polytoken worker lifecycle
