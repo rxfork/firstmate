@@ -47,7 +47,7 @@ fi
 exec 9>> "$lock"
 flock -n 9 || fail 'another anchor operation is in progress'
 if [ -e "$metadata" ]; then
-  if [ ! -f "$metadata" ] || ! jq -e --argjson expected "$snapshot" '. == $expected' "$metadata" >/dev/null; then
+  if [ ! -f "$metadata" ] || ! jq -se --argjson expected "$snapshot" '. == [$expected]' "$metadata" >/dev/null; then
     fail 'vessel is not anchored here with these options; metadata was not changed'
   fi
   if [ ! -f "$FM_CONFIG_OVERRIDE/backend" ] || [ "$(< "$FM_CONFIG_OVERRIDE/backend")" != tmux ]; then

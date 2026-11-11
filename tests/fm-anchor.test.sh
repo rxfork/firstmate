@@ -47,10 +47,11 @@ boarding_gate_never_repairs_metadata() (
   mkdir -p "$anchor"
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" > "$TMP_ROOT/registered"
-  for mode in raised foreign; do
+  for mode in raised foreign multiple-records; do
     case "$mode" in
       raised) jq '.anchored=false' "$TMP_ROOT/registered" > "$anchor/.firstmate.json" ;;
       foreign) jq '.harbor="another-harbor"' "$TMP_ROOT/registered" > "$anchor/.firstmate.json" ;;
+      multiple-records) { jq '.anchored=false' "$TMP_ROOT/registered"; printf '%s\n' "$(< "$TMP_ROOT/registered")"; } > "$anchor/.firstmate.json" ;;
     esac
     cp "$anchor/.firstmate.json" "$TMP_ROOT/before"
     if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/forbidden" >/dev/null 2>&1; then fail "$mode vessel started work"; fi
@@ -78,7 +79,7 @@ options_and_existing_work_are_not_converted() (
 )
 
 anchor_operations_use_one_regular_lock() (
-  local anchor="$TMP_ROOT/locked"
+  local anchor="$TMP_ROOT/locked" rc=0
   mkdir -p "$anchor"
   configure "$anchor"
   exec 8> "$anchor/.firstmate.lock"
@@ -87,7 +88,8 @@ anchor_operations_use_one_regular_lock() (
   exec 8>&-
   rm "$anchor/.firstmate.lock"
   mkfifo "$anchor/.firstmate.lock"
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1; then fail 'FIFO was treated as an anchor lock'; fi
+  timeout 5 bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail 'FIFO lock did not refuse promptly'
   rm "$anchor/.firstmate.lock"
   printf 'keep\n' > "$TMP_ROOT/unrelated"
   ln -s "$TMP_ROOT/unrelated" "$anchor/.firstmate.lock"
