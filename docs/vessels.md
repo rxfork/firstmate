@@ -41,10 +41,10 @@ Explicit supported directory overrides must still resolve inside the vessel and 
 The tmux socket directory and cache are always vessel-local, and ambient multiplexer routing is cleared.
 `run` exports the resolved environment before executing its command, so Nono and Pi inherit it without shell sourcing or `eval`.
 
-Core's `FM_WORKER_ENV_FORWARD` default selects portable runtime variables.
-Callers can append their default forwarding names with `FM_WORKER_ENV_FORWARD_DEFAULTS`, without restating core's list or assigning values to those variables.
-An explicitly supplied `FM_WORKER_ENV_FORWARD`, including an empty string, replaces the combined defaults.
-Nested execution preserves the resolved list rather than appending defaults again.
+`FM_WORKER_ENV_FORWARD` is one cumulative, whitespace-separated list of variable names.
+Personal environment configuration can append names; core appends its required portable runtime names while preserving those additions.
+An empty or unset incoming list does not disable core's forwarding.
+Nested execution retains the same names; repeated names are harmless.
 The existing worker launcher copies the selected current values (or clears selected unset values), then removes the forwarding control list from the worker itself.
 
 ## Locks and stopping work
@@ -57,5 +57,5 @@ Stopping work is manual; transfer and automated raising of the anchor are not im
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The core cases also exercise portable environment defaults, caller forwarding defaults, explicit overrides including empty, and nested execution.
+The core cases also exercise portable environment defaults, cumulative forwarding, empty incoming lists and nested execution.
 Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

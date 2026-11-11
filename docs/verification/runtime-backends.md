@@ -10,7 +10,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 Verified on 2026-11-11 on Linux.
 `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed six executable cases (`1..6`, `FM_TEST_COMPLETE`) for initialization, physical paths, recorded options, launch argv/status, startup gating, the short anchor lock and layered environment defaults.
-The environment case checks caller forwarding additions, exact explicit overrides including empty, and unchanged forwarding through nested core execution.
+The environment case checks cumulative forwarding additions, required core names with an empty incoming list, and retained forwarding names through nested core execution.
 These tests execute the core command without opening a tmux pane or running Pi/Nono interactively.
 These results do not prove all writers have stopped; [local vessels](../vessels.md) owns the supported scope.
 
