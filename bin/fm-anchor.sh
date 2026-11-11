@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Anchor one local vessel; no transfer, process manager or configuration audit.
-# Usage: fm-anchor.sh init|check --anchor DIRECTORY
+# Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME
+#        fm-anchor.sh check --anchor DIRECTORY
 #        fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]
 # Core supplies the portable environment; callers choose the runtime command.
 # .firstmate.json records this harbor, physical anchor and selected paths.
@@ -9,7 +10,7 @@
 # ordinary Firstmate retains its existing session lock. Stopping work is manual.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init|check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n'; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 [ "$#" -ge 3 ] || { usage >&2; exit 2; }
 mode=$1; shift
@@ -17,7 +18,14 @@ mode=$1; shift
 anchor=$(CDPATH='' cd -P -- "$2" && pwd -P) || fail 'anchor must be an existing directory'
 shift 2
 case "$mode" in
-  init|check) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
+  init)
+    if [ "$#" -ne 2 ] || [ "${1:-}" != --agent ] || [[ ! "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+      usage >&2
+      exit 2
+    fi
+    agent=$2
+    ;;
+  check) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   run) [ "$#" -ge 2 ] && [ "$1" = -- ] || { usage >&2; exit 2; }; shift ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -76,6 +84,7 @@ elif [ "$mode" = init ]; then
   [ "${#existing[@]}" -eq 0 ] || fail 'refusing to adopt nonempty unregistered vessel state'
   mkdir -p -- "${directories[@]}"
   printf 'tmux\n' > "$FM_CONFIG_OVERRIDE/backend"
+  printf 'agent: "%s"\n' "$agent" > "$NM_HOME/config.yaml"
   temporary=$(mktemp "$anchor/.firstmate.json.XXXXXX")
   trap 'rm -f -- "$temporary"' EXIT
   printf '%s\n' "$snapshot" > "$temporary"

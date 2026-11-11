@@ -18,13 +18,15 @@ Existing ordinary Firstmate home and backend selection remain unchanged.
 
 ```sh
 # Core supplies the environment before executing COMMAND:
-bash bin/fm-anchor.sh init --anchor /absolute/anchor
+bash bin/fm-anchor.sh init --anchor /absolute/anchor --agent pi
 bash bin/fm-anchor.sh check --anchor /absolute/anchor
 bash bin/fm-anchor.sh run --anchor /absolute/anchor -- COMMAND [ARG...]
 ```
 
-Initialization requires a fresh vessel and never adopts nonempty unregistered state.
-It creates the selected directories, records the explicitly selected backend and writes `.firstmate.json` beside the vessel.
+Initialization requires `--agent NAME` and a fresh vessel; it never adopts nonempty unregistered state.
+It creates the selected directories, records the backend, writes the selected No-mistakes agent to `$NM_HOME/config.yaml` and writes `.firstmate.json` beside the vessel.
+The name must be a No-mistakes-supported agent identifier; syntactically it uses lowercase letters, digits and hyphens, starting with a letter.
+Reinitialization and later launches preserve existing preferences; no agent is guessed or rewritten during startup.
 That small record contains the physical anchor, local harbor, anchored flag and selected directory options; it contains no credentials or arbitrary runtime arguments.
 Subsequent launches require the same recorded configuration and an anchored vessel at this harbor.
 A raised flag, foreign harbor, backend mismatch or path change refuses before the supplied command starts; boarding never repairs metadata silently.

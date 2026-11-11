@@ -29,7 +29,7 @@ local_anchor_records_options_and_preserves_argv() (
   local anchor="$TMP_ROOT/local anchor" result rc=0
   mkdir -p "$anchor"
   configure "$anchor"
-  result=$(bash "$ANCHOR_CLI" init --anchor "$anchor")
+  result=$(bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi)
   jq -e --arg anchor "$anchor" --arg harbor "$(uname -n)" '.version == 1 and .anchored == true and .anchor == $anchor and .harbor == $harbor and .backend == "tmux"' <<< "$result" >/dev/null || fail 'anchor identity was not recorded'
   [ "$(< "$FM_CONFIG_OVERRIDE/backend")" = tmux ] || fail 'selected backend was not initialized'
   jq -e --arg home "$FM_HOME" '.options.FM_HOME == $home' "$anchor/.firstmate.json" >/dev/null || fail 'boarding paths were not snapshotted'
@@ -46,7 +46,7 @@ boarding_gate_never_repairs_metadata() (
   local anchor="$TMP_ROOT/gated" mode
   mkdir -p "$anchor"
   configure "$anchor"
-  bash "$ANCHOR_CLI" init --anchor "$anchor" > "$TMP_ROOT/registered"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi > "$TMP_ROOT/registered"
   for mode in raised foreign multiple-records; do
     case "$mode" in
       raised) jq '.anchored=false' "$TMP_ROOT/registered" > "$anchor/.firstmate.json" ;;
@@ -65,7 +65,7 @@ options_and_existing_work_are_not_converted() (
   local anchor="$TMP_ROOT/options" existing="$TMP_ROOT/existing"
   mkdir -p "$anchor" "$existing/.firstmate"
   configure "$anchor"
-  bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   cp "$anchor/.firstmate.json" "$TMP_ROOT/options-before"
   if FM_BACKEND=zellij bash "$ANCHOR_CLI" check --anchor "$anchor" >/dev/null 2>&1; then fail 'backend changed'; fi
   if TREEHOUSE_ROOT="$FM_HOME/different" bash "$ANCHOR_CLI" check --anchor "$anchor" >/dev/null 2>&1; then fail 'recorded path changed'; fi
@@ -73,7 +73,7 @@ options_and_existing_work_are_not_converted() (
   cmp -s "$anchor/.firstmate.json" "$TMP_ROOT/options-before" || fail 'changed options rewrote metadata'
   printf 'keep existing work\n' > "$existing/.firstmate/work"
   configure "$existing"
-  if bash "$ANCHOR_CLI" init --anchor "$existing" >/dev/null 2>&1; then fail 'existing state was silently adopted'; fi
+  if bash "$ANCHOR_CLI" init --anchor "$existing" --agent pi >/dev/null 2>&1; then fail 'existing state was silently adopted'; fi
   [ "$(< "$existing/.firstmate/work")" = 'keep existing work' ] || fail 'existing work changed'
   pass 'backend/path mismatches and unregistered existing work refuse without conversion'
 )
@@ -84,16 +84,16 @@ anchor_operations_use_one_regular_lock() (
   configure "$anchor"
   exec 8> "$anchor/.firstmate.lock"
   flock -n 8
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1; then fail 'another operation bypassed the anchor lock'; fi
+  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'another operation bypassed the anchor lock'; fi
   exec 8>&-
   rm "$anchor/.firstmate.lock"
   mkfifo "$anchor/.firstmate.lock"
-  timeout 5 bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1 || rc=$?
+  timeout 5 bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 1 ] || fail 'FIFO lock did not refuse promptly'
   rm "$anchor/.firstmate.lock"
   printf 'keep\n' > "$TMP_ROOT/unrelated"
   ln -s "$TMP_ROOT/unrelated" "$anchor/.firstmate.lock"
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1; then fail 'symlink was treated as an anchor lock'; fi
+  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'symlink was treated as an anchor lock'; fi
   [ "$(< "$TMP_ROOT/unrelated")" = keep ] || fail 'anchor lock modified an unrelated file'
   pass 'anchor operations serialize with a regular lock and reject file aliases'
 )
@@ -105,7 +105,13 @@ core_environment_composes_forwarding_layers() (
     TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR NM_TEST_START_DAEMON FM_WORKER_ENV_FORWARD
   export FM_WORKER_ENV_FORWARD='PERSONAL_SETTING' PERSONAL_SETTING='personal value'
   export TMUX='/ambient/socket,1,0' TMUX_PANE='%1'
-  output=$(bash "$ANCHOR_CLI" init --anchor "$anchor")
+  if bash "$ANCHOR_CLI" init --anchor "$anchor" >/dev/null 2>&1; then fail 'initialization accepted a missing agent'; fi
+  [ ! -e "$anchor/.firstmate" ] || fail 'missing agent created vessel state'
+  output=$(bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi)
+  [ "$(< "$anchor/.firstmate/no-mistakes/config.yaml")" = 'agent: "pi"' ] || fail 'core did not record the selected agent'
+  printf 'agent: codex\n' > "$anchor/.firstmate/no-mistakes/config.yaml"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  [ "$(< "$anchor/.firstmate/no-mistakes/config.yaml")" = 'agent: codex' ] || fail 'initialization rewrote existing preferences'
   jq -e --arg home "$anchor/.firstmate" '.options.FM_HOME == $home and .options.TREEHOUSE_ROOT == ($home + "/worktrees")' <<< "$output" >/dev/null || fail 'core did not supply portable defaults'
   bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '
     [ "$FM_ANCHOR/.firstmate" = "$FM_HOME" ] && [ "$FM_BACKEND" = tmux ] &&
