@@ -27,12 +27,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zel
 . "$ROOT/tests/zellij-test-safety.sh"
 
 SESSION="fm-backend-smoke-$$"
-SESSION_STARTED=0
 export FM_ZELLIJ_SESSION="$SESSION"
 trap cleanup_all EXIT
 
 cleanup_all() {
-  [ "$SESSION_STARTED" = 1 ] || return 0
   zellij_safe_delete "$SESSION"
 }
 
@@ -52,21 +50,11 @@ fm_backend_source zellij || fail "fm_backend_source zellij failed"
 # --- version gate + container ensure -----------------------------------------
 
 fm_backend_zellij_version_check || fail "version_check failed against the real installed zellij"
-
-( nohup zellij attach -b "$SESSION" </dev/null >/dev/null 2>&1 & ) || fail "could not start isolated zellij session"
-for _ in $(seq 1 20); do
-  fm_backend_zellij_session_exists "$SESSION" && break
-  sleep 0.5
-done
-if ! fm_backend_zellij_session_exists "$SESSION"; then
-  echo "skip: zellij could not start an isolated session"
-  exit 0
-fi
-SESSION_STARTED=1
 pass "real zellij: version_check accepts the installed binary's version"
+
 CONTAINER=$(fm_backend_zellij_container_ensure) || fail "container_ensure failed"
 [ "$CONTAINER" = "$SESSION" ] || fail "container_ensure should echo the isolated session name, got '$CONTAINER'"
-pass "real zellij: container_ensure adopts the isolated live session ($CONTAINER)"
+pass "real zellij: container_ensure starts the isolated background session ($CONTAINER)"
 
 # A second container_ensure must reuse the same session (idempotent, no error).
 CONTAINER2=$(fm_backend_zellij_container_ensure) || fail "second container_ensure failed"

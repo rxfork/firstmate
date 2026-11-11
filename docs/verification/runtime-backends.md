@@ -2247,12 +2247,12 @@ The daemon injection transport into a live composer keeps its coverage in `tests
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
-All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion. The smoke fixture starts its own isolated session before exercising the adapter; production selection only adopts an already-live session and never invokes that creation command.
+All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Headless session | `zellij attach -b <name>` without a TTY | Created a persistent background session and returned. |
-| Session list | `zellij list-sessions --no-formatting` | Preserved the `EXITED` marker needed to exclude resumable stale sessions without starting one; `--short` returned names only and is therefore not a liveness source. |
+| Session list | `zellij list-sessions --short --no-formatting` | Returned one plain name per line without starting a session. |
 | Create tab | `zellij action new-tab --cwd <dir> --name <title>` | Returned a numeric tab id and focused the new tab when a client was attached. |
 | Pane discovery | `zellij action list-panes --json` | Included terminal pane id, tab id, plugin flag, and top-level `pane_cwd`. |
 | Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
@@ -2269,7 +2269,6 @@ The focus mitigation restored the previously active tab after `new-tab`, with th
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
-tests/fm-spawn-zellij-abort.test.sh
 ```
 
 The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.

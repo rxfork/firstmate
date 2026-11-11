@@ -9,11 +9,11 @@
 # bin/fm-backend.sh's fm_backend_source in normal operation; the unit tests
 # source it directly.
 #
-# Session shape: ONE already-live zellij session, selected explicitly through
-# FM_ZELLIJ_SESSION or automatically only when exactly one live session exists;
-# ONE tab per task, with caller-facing label "fm-<id>" and a home-scoped actual
-# title. Missing, exited, and ambiguous sessions refuse instead of being created
-# or guessed. No per-home workspace split (unlike herdr's later
+# Session shape (report "Zellij implementation choices" #1, unchanged by
+# empirical verification): ONE zellij session (default name "firstmate",
+# overridable via FM_ZELLIJ_SESSION for test isolation - mirrors herdr's
+# HERDR_SESSION), ONE tab per task, with caller-facing label "fm-<id>" and a
+# home-scoped actual title. No per-home workspace split (unlike herdr's later
 # P3 refinement): zellij has no workspace concept, only sessions/tabs/panes,
 # so this stays exactly the report's original choice. Target string shape:
 # "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
@@ -130,46 +130,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_ZELLIJ_MIN_MAJOR=0
 FM_BACKEND_ZELLIJ_MIN_MINOR=44
 
-# fm_backend_zellij_session: resolve the live session this spawn uses.
-# An explicit FM_ZELLIJ_SESSION must already be live; an exited or missing
-# session is never recreated. Without an override, exactly one live session is
-# selected and later recorded in task metadata. Zero or multiple live sessions
-# refuse rather than creating or guessing.
-fm_backend_zellij_live_sessions() {
-  # `--short` strips the EXITED marker as well as the live-session metadata, so
-  # it cannot distinguish a resumable stale name from a running session.
-  zellij list-sessions --no-formatting 2>/dev/null | awk '
-    {
-      upper = toupper($0)
-      if (index(upper, "(EXITED") > 0 || index(upper, "[EXITED") > 0) next
-      if (NF == 1 || index(upper, "[CREATED") > 0) print $1
-    }
-  '
-}
-
+# fm_backend_zellij_session: the session name this spawn/op uses.
+# FM_ZELLIJ_SESSION mirrors herdr's HERDR_SESSION ambient-selection knob: an
+# operator (or firstmate's own isolated test harness) sets it explicitly;
+# absent means the shared "firstmate" session. Do not use this alone for
+# destructive test cleanup; tests/zellij-test-safety.sh documents and guards
+# that path (mirrors tests/herdr-test-safety.sh).
 fm_backend_zellij_session() {
-  local configured=${FM_ZELLIJ_SESSION:-} sessions count
-  if [ -n "$configured" ]; then
-    if fm_backend_zellij_session_exists "$configured"; then
-      printf '%s' "$configured"
-      return 0
-    fi
-    echo "error: configured zellij session '$configured' is not live; refusing to create or resurrect it" >&2
-    return 1
-  fi
-  sessions=$(fm_backend_zellij_live_sessions)
-  count=$(printf '%s\n' "$sessions" | awk 'NF { n++ } END { print n+0 }')
-  case "$count" in
-    1) printf '%s' "$sessions" ;;
-    0)
-      echo "error: no live zellij session is available; start or attach one, or set FM_ZELLIJ_SESSION to a live session" >&2
-      return 1
-      ;;
-    *)
-      echo "error: multiple live zellij sessions are available; set FM_ZELLIJ_SESSION explicitly" >&2
-      return 1
-      ;;
-  esac
+  printf '%s' "${FM_ZELLIJ_SESSION:-firstmate}"
 }
 
 # fm_backend_zellij_home_label: readable home prefix plus a short hash of the
@@ -253,17 +221,38 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
 # orphan whatever the caller actually meant to reach). Every op below calls
 # this first and fails rather than guessing.
 fm_backend_zellij_session_exists() {  # <session>
-  fm_backend_zellij_live_sessions | grep -qxF "$1"
+  zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
 }
 
-# fm_backend_zellij_container_ensure: version-gate and resolve one already-live
-# session. Echoes the session name (no workspace component). It deliberately
-# never starts a session: an exited configured session must not be resurrected,
-# and an unset selector must not guess among multiple captain-visible sessions.
+# fm_backend_zellij_server_ensure: create the named session in the background,
+# headless (no attached client), if it does not already exist - mirrors
+# tmux's `tmux has-session || tmux new-session -d` and herdr's server_ensure.
+# Verified: `zellij attach -b <name>` with stdin redirected from /dev/null and
+# no controlling TTY creates the session and returns promptly (it cannot
+# actually attach without a TTY, so it exits after creating); running it again
+# against an EXISTING session prints "Session already exists" and exits 1 -
+# harmless here because existence is checked first and the launch is
+# backgrounded, its exit status never inspected.
+fm_backend_zellij_server_ensure() {  # <session>
+  local session=$1 i
+  fm_backend_zellij_session_exists "$session" && return 0
+  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  for i in $(seq 1 20); do
+    fm_backend_zellij_session_exists "$session" && return 0
+    sleep 0.5
+  done
+  echo "error: zellij session '$session' did not come up within 10s" >&2
+  return 1
+}
+
+# fm_backend_zellij_container_ensure: the full spawn-time container-ensure
+# sequence (version gate, session). Echoes the session name (no second
+# "workspace" component - zellij has no such concept, unlike herdr).
 fm_backend_zellij_container_ensure() {
   local session
   fm_backend_zellij_version_check || return 1
-  session=$(fm_backend_zellij_session) || return 1
+  session=$(fm_backend_zellij_session)
+  fm_backend_zellij_server_ensure "$session" || return 1
   printf '%s' "$session"
 }
 
@@ -342,7 +331,7 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 #
 # Echoes "<tab_id> <pane_id>" on success.
 fm_backend_zellij_create_task() {  # <session> <label> <cwd>
-  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id shell i
+  local session=$1 label=$2 cwd=$3 title tabs dup prev_active tab_id pane_id
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
@@ -352,7 +341,7 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
     return 1
   fi
   prev_active=$(printf '%s' "$tabs" | jq -r '.[]? | select(.active == true) | .tab_id' 2>/dev/null | head -1)
-  tab_id=$(fm_backend_zellij_cli "$session" action new-tab --layout default --cwd "$cwd" --name "$title" 2>/dev/null | tr -d '[:space:]')
+  tab_id=$(fm_backend_zellij_cli "$session" action new-tab --cwd "$cwd" --name "$title" 2>/dev/null | tr -d '[:space:]')
   case "$tab_id" in
     ''|*[!0-9]*)
       echo "error: zellij new-tab did not return a numeric tab id for '$title' (got '$tab_id'; session '$session' may not exist)" >&2
@@ -361,21 +350,7 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   esac
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
-    shell=${SHELL:-/bin/sh}
-    case "$shell" in /*) [ -x "$shell" ] || shell=/bin/sh ;; *) shell=/bin/sh ;; esac
-    fm_backend_zellij_cli "$session" action new-pane --tab-id "$tab_id" --cwd "$cwd" -- "$shell" -i >/dev/null 2>&1 || true
-    for i in 1 2 3 4 5; do
-      pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
-      [ -n "$pane_id" ] && break
-      sleep 0.1
-    done
-  fi
-  if [ -z "$pane_id" ]; then
-    fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
-    if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
-      fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
-    fi
-    echo "error: could not create a terminal pane for zellij tab $tab_id (session '$session')" >&2
+    echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
     return 1
   fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
@@ -692,7 +667,7 @@ fm_backend_zellij_list_live() {  # <session>
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")
-  sessions=$(fm_backend_zellij_live_sessions)
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
