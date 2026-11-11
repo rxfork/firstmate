@@ -11,13 +11,13 @@ This interface supports local Linux anchoring and starting work, not moving betw
 
 ## Local setup
 
-A caller supplies `FM_HOME=<anchor>/.firstmate`, explicitly selects `FM_BACKEND=tmux` and supplies the directory settings listed in `bin/fm-anchor.sh`.
-The personal dotfiles launcher starts Pi under Nono directly in the current terminal pane and selects tmux for workers only.
-It supplies its own environment defaults; shared core supplies no personal harness flags or worker forwarding list.
+`fm-anchor.sh` derives and exports the vessel layout, tmux worker environment and portable tool-state locations for `init`, `check` and `run`.
+The personal dotfiles launcher supplies the confirmation prompt, Nono policy, Pi flags and personal preference defaults.
+Pi runs directly in the current terminal pane; tmux is for workers only.
 Existing ordinary Firstmate home and backend selection remain unchanged.
 
 ```sh
-# With the caller's directory environment already selected:
+# Core supplies the environment before executing COMMAND:
 bash bin/fm-anchor.sh init --anchor /absolute/anchor
 bash bin/fm-anchor.sh check --anchor /absolute/anchor
 bash bin/fm-anchor.sh run --anchor /absolute/anchor -- COMMAND [ARG...]
@@ -34,6 +34,19 @@ Host tooling, preferences and authentication remain host inputs.
 These checks cover selected directory settings, not every possible reference inside application configuration or Git storage.
 There is no automatic state collection, path rewriting or backend conversion.
 
+## Environment layers
+
+Core supplies portable directory defaults and defaults No-mistakes to descendant daemon mode with `NM_TEST_START_DAEMON=1` (No-mistakes 1.111+).
+Explicit supported directory overrides must still resolve inside the vessel and match its recorded configuration; conflicting inherited anchor/home settings refuse.
+The tmux socket directory and cache are always vessel-local, and ambient multiplexer routing is cleared.
+`run` exports the resolved environment before executing its command, so Nono and Pi inherit it without shell sourcing or `eval`.
+
+Core's `FM_WORKER_ENV_FORWARD` default selects portable runtime variables.
+Callers can append their default forwarding names with `FM_WORKER_ENV_FORWARD_DEFAULTS`, without restating core's list or assigning values to those variables.
+An explicitly supplied `FM_WORKER_ENV_FORWARD`, including an empty string, replaces the combined defaults.
+Nested execution preserves the resolved list rather than appending defaults again.
+The existing worker launcher copies the selected current values (or clears selected unset values), then removes the forwarding control list from the worker itself.
+
 ## Locks and stopping work
 
 The anchor lock only serializes initialization and startup checks.
@@ -44,6 +57,5 @@ Stopping work is manual; transfer and automated raising of the anchor are not im
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The caller's `just check-firstmate` tests its runtime policy, direct primary Pi launch and literal argument preservation without opening worker panes.
-Set `FIRSTMATE_TEST_CORE` to this checkout's `bin/fm-anchor.sh` while running those caller tests to exercise the real caller/core boundary.
+The core cases also exercise portable environment defaults, caller forwarding defaults, explicit overrides including empty, and nested execution.
 Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

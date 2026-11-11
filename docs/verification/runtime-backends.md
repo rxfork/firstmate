@@ -9,9 +9,9 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 ## Local vessel anchoring
 
 Verified on 2026-11-11 on Linux.
-`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed five executable cases for initialization, physical paths, recorded options, launch argv/status, startup gating and the short anchor lock.
-In the caller repository, `FIRSTMATE_TEST_CORE=/path/to/firstmate/bin/fm-anchor.sh just check-firstmate` passed seven cases (`Ran 7 tests`, `OK`), including the real core gate and a direct primary Pi command with unchanged semicolons, backslashes and empty arguments.
-These tests inspect the executable caller/core boundary without opening a tmux pane or running Pi/Nono interactively.
+`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed six executable cases (`1..6`, `FM_TEST_COMPLETE`) for initialization, physical paths, recorded options, launch argv/status, startup gating, the short anchor lock and layered environment defaults.
+The environment case checks caller forwarding additions, exact explicit overrides including empty, and unchanged forwarding through nested core execution.
+These tests execute the core command without opening a tmux pane or running Pi/Nono interactively.
 These results do not prove all writers have stopped; [local vessels](../vessels.md) owns the supported scope.
 
 ## Polytoken worker lifecycle

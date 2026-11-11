@@ -98,4 +98,30 @@ anchor_operations_use_one_regular_lock() (
   pass 'anchor operations serialize with a regular lock and reject file aliases'
 )
 
-fm_test_run unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+core_environment_composes_forwarding_layers() (
+  local anchor="$TMP_ROOT/environment" output forwarded nested
+  mkdir -p "$anchor"
+  unset FM_ANCHOR FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
+    TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR NM_TEST_START_DAEMON FM_WORKER_ENV_FORWARD
+  export FM_WORKER_ENV_FORWARD_DEFAULTS='PERSONAL_SETTING' PERSONAL_SETTING='personal value'
+  export TMUX='/ambient/socket,1,0' TMUX_PANE='%1'
+  output=$(bash "$ANCHOR_CLI" init --anchor "$anchor")
+  jq -e --arg home "$anchor/.firstmate" '.options.FM_HOME == $home and .options.TREEHOUSE_ROOT == ($home + "/worktrees")' <<< "$output" >/dev/null || fail 'core did not supply portable defaults'
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '
+    [ "$FM_ANCHOR/.firstmate" = "$FM_HOME" ] && [ "$FM_BACKEND" = tmux ] &&
+    [ "$NM_HOME" = "$FM_HOME/no-mistakes" ] && [ "$NM_TEST_START_DAEMON" = 1 ] &&
+    [ -z "${TMUX+x}" ] && [ -z "${TMUX_PANE+x}" ] &&
+    [[ " $FM_WORKER_ENV_FORWARD " = *" TREEHOUSE_ROOT "* ]] &&
+    [[ " $FM_WORKER_ENV_FORWARD " = *" PERSONAL_SETTING "* ]] && [ "$PERSONAL_SETTING" = "personal value" ]
+  ' || fail 'core and caller forwarding defaults did not compose'
+  forwarded=$(bash "$ANCHOR_CLI" run --anchor "$anchor" -- printenv FM_WORKER_ENV_FORWARD)
+  nested=$(bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash "$ANCHOR_CLI" run --anchor "$anchor" -- printenv FM_WORKER_ENV_FORWARD)
+  [ "$nested" = "$forwarded" ] || fail 'nested execution recomposed the resolved forwarding list'
+  for output in '' PERSONAL_SETTING; do
+    FM_WORKER_ENV_FORWARD="$output" bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '[ "$FM_WORKER_ENV_FORWARD" = "$1" ]' bash "$output" || fail 'explicit forwarding override was changed'
+  done
+  if FM_ANCHOR="$TMP_ROOT/other" bash "$ANCHOR_CLI" check --anchor "$anchor" >/dev/null 2>&1; then fail 'conflicting inherited anchor was accepted'; fi
+  pass 'core exports portable defaults and composes caller defaults without replacing explicit forwarding'
+)
+
+fm_test_run core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
