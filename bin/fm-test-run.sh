@@ -351,6 +351,7 @@ family_for_basename() {
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
+    fm-anchor.test.sh) printf '%s\n' vessel ;;
     fm-backlog-atomicity.test.sh|\
     fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-github-https-lib.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
@@ -472,6 +473,7 @@ family_for_basename() {
 
 expected_gate_skip_for_family() {
   case "$1" in
+    vessel) printf '%s\n' optional-platform ;;
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' live-capability ;;
     cmux|zellij|orca|paseo|rex|tern|hc) printf '%s\n' optional-binary ;;
@@ -492,6 +494,7 @@ backend-dispatch
 pr-forge
 afk
 snapshot-bearings
+vessel
 cmux
 zellij
 orca
@@ -809,6 +812,7 @@ tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
 tests/fm-github-https-lib.test.sh 1000
+tests/fm-anchor.test.sh 2500
 tests/fm-gitignore-config.test.sh 59
 tests/fm-gotmp.test.sh 1509
 tests/fm-grok-continuity-live-e2e.test.sh 46

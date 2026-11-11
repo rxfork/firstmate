@@ -126,6 +126,14 @@
   ],
   "surfaces": [
     {
+      "path": "GLOSSARY.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/vessels.md",
+      "audience": "operator-current"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },

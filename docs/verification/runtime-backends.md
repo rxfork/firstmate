@@ -6,6 +6,14 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Local vessel anchoring
+
+Verified on 2026-11-11 on Linux with tmux 3.8.
+`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed five executable cases for initialization, physical paths, recorded options, launch argv/status, startup gating and the short anchor lock.
+In the caller repository, `FIRSTMATE_TEST_CORE=/path/to/firstmate/bin/fm-anchor.sh just check-firstmate` passed seven cases, including the real core gate and the native tmux command parser's terminal-semicolon handling in private HOME/XDG/socket state.
+The parser proof creates no pane or PTY and does not run Pi/Nono interactively.
+These results do not prove all writers have stopped; [local vessels](../vessels.md) owns the supported scope.
+
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
