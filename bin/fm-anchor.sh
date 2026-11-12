@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Anchor or sail a vessel; no process manager or live-writer certification.
+# Anchor, stop or sail a vessel; no generic process manager or writer certification.
 # Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME
 #        fm-anchor.sh check --anchor DIRECTORY
 #        fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]
 #        fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]
-# Sailing uses SSH/rsync at identical physical paths and requires manually
-# stopped source work. Host tooling/auth remain local. Routing and the peer
-# prepare/copy/commit sequence are owned by fm-vessel.py.
+#        fm-anchor.sh stop --anchor DIRECTORY
+#        fm-anchor.sh status --anchor DIRECTORY
+# Sailing uses SSH/rsync at identical physical paths. Source preparation stops
+# known work and asks the source primary to resolve unfamiliar processes.
+# Host tooling/auth remain local. fm-vessel.py owns routing, stopping and the
+# prepare/copy/commit sequence; status lists the local scoped process facts.
 # init/run discover repositories under the anchor, skipping .firstmate and
 # repository contents, and clone their origins into the selected projects path
 # only when missing. Existing vessel clones are never refreshed or replaced.
@@ -15,10 +18,10 @@
 # run checks that exact configuration and anchored=true before exec.
 # .firstmate.lock serializes core operations, not the lifetime of writers;
 # sailing holds the destination lock until arrival. Ordinary Firstmate retains
-# its existing session lock. Stopping work is manual.
+# its existing session lock. Unknown or unconfirmed stops prevent copying.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]\nSailing requires identical physical anchor paths, SSH/rsync and manually stopped source work.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY\n       fm-anchor.sh status --anchor DIRECTORY\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -38,7 +41,7 @@ case "$mode" in
     fi
     agent=$2
     ;;
-  check) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
+  check|stop|status) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   sail)
     if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "${1:-}" != --from ]; }; then
       usage >&2
@@ -83,8 +86,8 @@ done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
 snapshot=$(jq -n "${args[@]}" '{version:1, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
-if [ "$mode" = sail ]; then
-  printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" sail --anchor "$anchor" "$@"
+if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ]; then
+  printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" "$@"
   exit $?
 fi
 lock="$anchor/.firstmate.lock"

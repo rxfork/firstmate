@@ -380,7 +380,7 @@ family_for_basename() {
     fm-worker-account-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
-    fm-pi-primary-live-e2e.test.sh|fm-pi-worker-stream-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
+    fm-pi-primary-live-e2e.test.sh|fm-pi-worker-stream-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|fm-vessel-stop-pi-live.test.sh|\
     fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-supervision-host-live-e2e.test.sh|fm-supervision-host-attended-live-e2e.test.sh|\
@@ -812,7 +812,7 @@ tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
 tests/fm-github-https-lib.test.sh 1000
-tests/fm-anchor.test.sh 21151
+tests/fm-anchor.test.sh 48371
 tests/fm-gitignore-config.test.sh 59
 tests/fm-gotmp.test.sh 1509
 tests/fm-grok-continuity-live-e2e.test.sh 46
@@ -864,6 +864,7 @@ tests/fm-pi-branch-live-e2e.test.sh 48
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 12834
 tests/fm-pi-codex-native.test.sh 75
 tests/fm-pi-primary-live-e2e.test.sh 72
+tests/fm-vessel-stop-pi-live.test.sh 5000
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh 45
 tests/fm-pi-watch-extension.test.sh 56515
 tests/fm-pi-windows-shell-invocation.test.sh 5121

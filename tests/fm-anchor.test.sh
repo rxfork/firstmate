@@ -106,6 +106,11 @@ anchor_operations_use_one_regular_lock() (
 
 core_environment_composes_forwarding_layers() (
   local anchor="$TMP_ROOT/environment" output forwarded nested
+  env -i PATH="$PATH" HOME="$HOME" FM_ANCHOR="$TMP_ROOT/not-a-live-vessel" \
+    bash -es -- "$ROOT/tests/lib.sh" <<'SH' || fail 'test helpers retained a live vessel identity'
+. "$1"
+test -z "${FM_ANCHOR+x}"
+SH
   mkdir -p "$anchor"
   unset FM_ANCHOR FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
     TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR NM_TEST_START_DAEMON FM_WORKER_ENV_FORWARD
@@ -137,6 +142,89 @@ core_environment_composes_forwarding_layers() (
   done
   if FM_ANCHOR="$TMP_ROOT/other" bash "$ANCHOR_CLI" check --anchor "$anchor" >/dev/null 2>&1; then fail 'conflicting inherited anchor was accepted'; fi
   pass 'core exports portable defaults and appends forwarding names without losing caller additions'
+)
+
+sailing_stops_registered_work_without_discarding_state() (
+  setup_harbors known-work
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  mkdir -p "$FM_FIXTURE_WORLD/source-core/bin" "$TMUX_TMPDIR/tmux-$(id -u)"
+  cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$FM_FIXTURE_WORLD/source-core/bin/"
+  for entry in 'fm-control.sh control' 'fm-watch-arm.sh watch'; do
+    read -r name operation <<< "$entry"
+    printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-harbors.py" %s "$@"\n' "$ROOT" "$operation" > "$FM_FIXTURE_WORLD/source-core/bin/$name"
+    chmod +x "$FM_FIXTURE_WORLD/source-core/bin/$name"
+  done
+  rm "$FM_FIXTURE_WORLD/hosts/desktop/home/.local/share/firstmate"
+  ln -s "$FM_FIXTURE_WORLD/source-core" "$FM_FIXTURE_WORLD/hosts/desktop/home/.local/share/firstmate"
+  for entry in 'tmux tmux' 'no-mistakes daemon'; do
+    read -r name operation <<< "$entry"
+    printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-harbors.py" %s "$@"\n' "$ROOT" "$operation" > "$FM_FIXTURE_WORLD/fakebin/$name"
+    chmod +x "$FM_FIXTURE_WORLD/fakebin/$name"
+  done
+  sleep 120 &
+  local worker=$! server
+  printf '%s\n' "$worker" > "$FM_FIXTURE_WORLD/worker.pid"
+  python3 -c 'import os, socket, time; s = socket.socket(socket.AF_UNIX); s.bind(os.environ["TMUX_TMPDIR"] + "/tmux-" + str(os.getuid()) + "/default"); time.sleep(120)' &
+  server=$!
+  printf '%s\n' "$server" > "$FM_FIXTURE_WORLD/tmux.pid"
+  trap 'kill "$worker" "$server" 2>/dev/null || true; wait "$worker" "$server" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 100); do [ ! -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || break; sleep 0.02; done
+  [ -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || fail 'private socket fixture did not start'
+  printf 'kind=ship\nwindow=firstmate:fixture-worker\n' > "$FM_STATE_OVERRIDE/fixture-worker.meta"
+  printf 'uncommitted work\n' > "$FM_PROJECTS_OVERRIDE/dirty"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null || fail 'registered work did not stop before transfer'
+  wait "$worker" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  trap - EXIT
+  jq -se 'any(.operation == "control" and .args == ["fixture-worker", "exit"]) and any(.operation == "watch" and .args == ["--stop"]) and any(.operation == "daemon" and .args == ["daemon", "stop"]) and any(.operation == "tmux" and .args[2] == "kill-server")' "$FM_FIXTURE_WORLD/stop-calls" >/dev/null || fail 'stop did not use the existing scoped tool interfaces'
+  [ "$(< "$FM_PROJECTS_OVERRIDE/dirty")" = 'uncommitted work' ] && [ -f "$FM_STATE_OVERRIDE/fixture-worker.meta" ] || fail 'stopping discarded work or task records'
+  pass 'sailing stops registered workers, monitoring, validation and its private tmux server without cleanup of working state'
+)
+
+unavailable_sources_report_the_payload_reason() (
+  setup_harbors unavailable-source
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'changed\n' > "$FM_CONFIG_OVERRIDE/backend"
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'an unavailable payload was copied'; fi
+  rg -q 'vessel backend configuration changed' "$FM_FIXTURE_WORLD/error" || fail 'payload refusal reason was hidden'
+  jq -e '.anchored' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'payload refusal changed source ownership'
+  pass 'discovery explains an unavailable payload instead of hiding the peer validation error'
+)
+
+source_stop_errors_preserve_the_refusal_reason() (
+  setup_harbors stop-refusal
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf '#!/bin/sh\nprintf "active validation must stop first\\n" >&2\nexit 77\n' > "$FM_FIXTURE_WORLD/fakebin/no-mistakes"
+  chmod +x "$FM_FIXTURE_WORLD/fakebin/no-mistakes"
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'refused daemon stop copied data'; fi
+  rg -q 'active validation must stop first' "$FM_FIXTURE_WORLD/error" || fail 'daemon refusal stderr was hidden'
+  rg -q 'exit 77' "$FM_FIXTURE_WORLD/error" || fail 'daemon refusal exit code was hidden'
+  [ ! -e "$FM_ANCHOR/.firstmate.json" ] || fail 'refused daemon stop activated a destination'
+  pass 'a refused service stop blocks copying and retains its actual diagnostic and exit code'
+)
+
+unknown_source_work_blocks_copy_without_killing_it() (
+  setup_harbors unknown-work
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  (cd "$FM_HOME/projects"; exec sleep 120) &
+  local writer=$!
+  trap 'kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
+  bash "$ANCHOR_CLI" status --anchor "$FM_ANCHOR" | jq -e --argjson pid "$writer" '.processes | any(.pid == $pid)' >/dev/null || fail 'status missed source work'
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'live unknown source work was copied'; fi
+  kill -0 "$writer" || fail 'sailing killed an unknown process'
+  rg -q 'source work has not stopped' "$FM_FIXTURE_WORLD/error" || fail 'remaining source work was hidden'
+  rg -q "\"pid\": $writer" "$FM_FIXTURE_WORLD/error" || fail 'remaining source process was not identified'
+  [ ! -e "$FM_ANCHOR/.firstmate.json" ] || fail 'failed source stop activated a destination'
+  jq -e '.anchored == false and .sailing_to == "laptop"' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'stop did not reserve and fence the source'
+  kill "$writer"
+  wait "$writer" 2>/dev/null || true
+  trap - EXIT
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null || fail 'stopped source could not retry sailing'
+  pass 'unknown source processes block copying without being killed and the reserved transfer can retry'
 )
 
 vessel_projects_clone_origins_only_when_missing() (
@@ -450,4 +538,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock

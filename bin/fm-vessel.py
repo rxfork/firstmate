@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Private metadata and sailing implementation for fm-anchor.sh.
 
-Sailing requires manually stopped work and identical physical anchor paths.
+Sailing stops source work before copying at identical physical anchor paths.
 Host tools/authentication are not copied. Ordinary SSH configuration is used.
 
 Record owner: version 1 contains the original local anchor configuration;
@@ -20,21 +20,42 @@ prepared record, clears sailing_to and updates the origin's last-known hint.
 Rsync incrementally mirrors into the same receiver directory with deletions;
 inactive local state is disposable cache, not a backup or an anchored source.
 The destination activates only after acknowledgement and a complete sync.
-Interrupted transfers remain inactive and retry against that cache. No receipts,
-leases, global registry or automatic process stopping are involved.
+Interrupted transfers remain inactive and retry against that cache. There are
+no transfer receipts, leases, global registry or generic process manager.
+
+Stopping uses recorded workers' fm-control exit, the home-scoped watcher stop,
+and no-mistakes daemon stop without force. A verified vessel-local primary Pi
+receives SIGTERM through a pidfd; its owned children and private tmux server
+must finish before copy. Unfamiliar processes and refused stops are reported
+through the existing primary inbox, once per primary process generation.
+prepare releases its lock between destination retries, allowing the primary
+to finish cleanup. Sailing waits up to 60 seconds for that coordination before
+refusing without a copy. The source remains reserved for the same retry.
+
+status lists accessible same-user /proc cwd/environment matches against vessel
+paths, plus the recorded primary. This is not certification of every possible
+writer: unrelated protected processes are not inspected, and a daemon that
+clears its environment and leaves the vessel may not be attributable here.
+Known but unverified primary ownership or remaining processes prevent transfer.
+Only Pi is signalled directly; there is no name-pattern kill, force stop,
+teardown, worktree return, or cleanup of unlanded work.
 """
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -316,11 +337,271 @@ def remote(anchor, host, operation, request=None):
     except subprocess.CalledProcessError as error:
         detail = error.stderr.strip() or error.stdout.strip() or "no diagnostic output"
         fail(f"{host} {operation} failed (exit {error.returncode}): {detail}")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
     reply = json.loads(result.stdout)
     reply["here"] = harbor_name(reply["here"])
     if reply["record"] is not None:
         validate_record(reply["record"], anchor)
     return reply
+
+
+def process_info(pid):
+    text = (Path("/proc") / str(pid) / "stat").read_text(errors="replace")
+    name, _, tail = text.rpartition(") ")
+    fields = tail.split()
+    return {
+        "pid": int(pid),
+        "name": name.partition("(")[2],
+        "state": fields[0],
+        "ppid": int(fields[1]),
+        "start": fields[19],
+    }
+
+
+def ancestors(pid):
+    result = set()
+    while pid > 0 and pid not in result:
+        result.add(pid)
+        try:
+            pid = process_info(pid)["ppid"]
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            break
+    return result
+
+
+def session_pid(record):
+    lock = Path(record["options"]["FM_STATE_OVERRIDE"]) / ".lock"
+    if not lock.exists():
+        return ""
+    if lock.is_symlink() or not lock.is_file():
+        fail("primary session lock must be a regular file")
+    return lock.read_text().partition("\n")[0]
+
+
+def vessel_processes(anchor, record):
+    vessel = anchor / ".firstmate"
+    actors = ancestors(os.getpid())
+    pid = session_pid(record)
+    if pid.isdigit():
+        actors.discard(int(pid))
+    result = []
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit() or int(path.name) in actors:
+            continue
+        try:
+            if path.stat().st_uid != os.getuid():
+                if path.name == pid:
+                    fail(
+                        "recorded primary belongs to another user; cannot verify shutdown"
+                    )
+                continue
+            info = process_info(int(path.name))
+            if info["state"] in ("Z", "X"):
+                continue
+            try:
+                cwd = os.readlink(path / "cwd")
+            except PermissionError:
+                cwd = ""
+            try:
+                environment = dict(
+                    entry.split(b"=", 1)
+                    for entry in (path / "environ").read_bytes().split(b"\0")
+                    if b"=" in entry
+                )
+            except PermissionError:
+                environment = {}
+            scoped = Path(cwd).is_relative_to(vessel) or any(
+                Path(os.fsdecode(environment.get(name.encode(), b""))).is_relative_to(
+                    vessel
+                )
+                for name in OPTION_NAMES
+            )
+            if scoped or path.name == pid:
+                result.append({**info, "cwd": cwd, "scoped": scoped})
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return result
+
+
+def primary_process(record, processes):
+    pid = session_pid(record)
+    for process in processes:
+        if str(process["pid"]) != pid or not process["scoped"]:
+            continue
+        # The session-lock owner also recognizes Pi's exact kernel process name.
+        if process["name"] == "pi":
+            return process
+        executable = shutil.which("pi")
+        if executable is None:
+            return None
+        arguments = (Path("/proc") / pid / "cmdline").read_bytes().split(b"\0")
+        if (Path("/proc") / pid / "exe").resolve() == Path(executable).resolve() or any(
+            value
+            and Path(os.fsdecode(value)).is_absolute()
+            and Path(os.fsdecode(value)).resolve() == Path(executable).resolve()
+            for value in arguments[:2]
+        ):
+            return process
+    return None
+
+
+def stop_vessel(anchor, record):
+    options = record["options"]
+    environment = {
+        **os.environ,
+        **options,
+        "FM_ANCHOR": str(anchor),
+        "FM_BACKEND": "tmux",
+    }
+    for name in ("TMUX", "TMUX_PANE", "FM_ROOT_OVERRIDE"):
+        environment.pop(name, None)
+    scripts = Path(__file__).resolve().parent
+    errors = []
+
+    def stop(command):
+        result = subprocess.run(
+            command, env=environment, stdout=sys.stderr, check=False
+        )
+        if result.returncode:
+            errors.append(
+                f"{Path(command[0]).name} refused to stop (exit {result.returncode})"
+            )
+
+    socket = Path(options["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
+    shells = set()
+    if socket.is_socket():
+        windows = subprocess.check_output(
+            [
+                "tmux",
+                "-S",
+                str(socket),
+                "list-windows",
+                "-a",
+                "-F",
+                "#{session_name}:#{window_name}",
+            ],
+            env=environment,
+            text=True,
+        ).splitlines()
+        for path in Path(options["FM_STATE_OVERRIDE"]).glob("*.meta"):
+            metadata = dict(
+                line.split("=", 1)
+                for line in path.read_text().splitlines()
+                if "=" in line
+            )
+            if metadata.get("window") in windows:
+                stop([str(scripts / "fm-control.sh"), path.stem, "exit"])
+        panes = subprocess.check_output(
+            [
+                "tmux",
+                "-S",
+                str(socket),
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pid}\t#{pane_pid}\t#{pane_current_command}",
+            ],
+            env=environment,
+            text=True,
+        ).splitlines()
+        for pane in panes:
+            server, pid, command = pane.split("\t")
+            shells.add(int(server))
+            if command in ("bash", "fish", "zsh", "sh", "dash"):
+                shells.add(int(pid))
+    if shutil.which("no-mistakes"):
+        stop(["no-mistakes", "daemon", "stop"])
+    processes = vessel_processes(anchor, record)
+    primary = primary_process(record, processes)
+    primary_actors = ancestors(primary["pid"]) if primary else set()
+    owned = {primary["pid"]} if primary else set()
+    for item in processes:
+        try:
+            arguments = (
+                (Path("/proc") / str(item["pid"]) / "cmdline").read_bytes().split(b"\0")
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if any(
+            argument
+            in (
+                os.fsencode(scripts / "fm-watch.sh"),
+                os.fsencode(scripts / "fm-watch-arm.sh"),
+            )
+            for argument in arguments[:2]
+        ):
+            owned.add(item["pid"])
+    remaining = [
+        item
+        for item in processes
+        if item["pid"] not in shells | primary_actors
+        and not (ancestors(item["pid"]) & owned)
+    ]
+    requested = False
+    if remaining or errors:
+        if primary:
+            message = (
+                "Stop work in this vessel for sailing. "
+                "Stop the remaining vessel processes using their own stop commands; preserve "
+                "all repositories, worktrees, dirty files and durable task records. Do not "
+                "start new work or discard anything. The transfer will gracefully exit Pi "
+                "once the other work has stopped. Remaining processes: "
+                + json.dumps(remaining)
+                + "; stop errors: "
+                + json.dumps(errors)
+            )
+            generation = f"{record['harbor']}:{Path('/proc/sys/kernel/random/boot_id').read_text().strip()}:{primary['pid']}:{primary['start']}"
+            request_id = (
+                "vessel-stop-" + hashlib.sha256(generation.encode()).hexdigest()[:24]
+            )
+            result = subprocess.run(
+                [
+                    str(scripts / "fm-inbox.sh"),
+                    "note",
+                    "--request-id",
+                    request_id,
+                    "--",
+                    message,
+                ],
+                env=environment,
+                stdout=sys.stderr,
+                check=False,
+            )
+            requested = result.returncode == 0
+            if not requested:
+                errors.append(
+                    "could not notify the source primary; no transfer was started"
+                )
+    else:
+        if primary:
+            fd = os.pidfd_open(primary["pid"])
+            try:
+                if process_info(primary["pid"])["start"] != primary["start"]:
+                    fail("primary changed before shutdown; retry sailing")
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                if not select.select([fd], [], [], 10)[0]:
+                    errors.append(
+                        "Pi did not finish graceful shutdown within 10 seconds"
+                    )
+            finally:
+                os.close(fd)
+        stop([str(scripts / "fm-watch-arm.sh"), "--stop"])
+        if socket.is_socket() and not errors:
+            stop(["tmux", "-S", str(socket), "kill-server"])
+        # Pi's sandbox wrapper can take a moment to finish its own cleanup.
+        deadline = time.monotonic() + 5
+        while True:
+            remaining = vessel_processes(anchor, record)
+            if not remaining or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+    return {
+        "stopped": not remaining and not errors,
+        "remaining": remaining,
+        "errors": errors,
+        "requested": requested,
+    }
 
 
 def peer(anchor, operation):
@@ -331,13 +612,19 @@ def peer(anchor, operation):
                 read_record(anchor) if (anchor / ".firstmate.json").exists() else None
             )
             available = False
+            error = None
             if record is not None and record["harbor"] == local:
                 try:
                     check_payload(anchor, record)
                     available = True
-                except (OSError, ValueError):
-                    pass
-            return {"here": local, "record": record, "available": available}
+                except (OSError, ValueError) as failure:
+                    error = str(failure)
+            return {
+                "here": local,
+                "record": record,
+                "available": available,
+                "error": error,
+            }
         request = json.load(sys.stdin)
         destination = harbor_name(request["destination"])
         record = read_record(anchor)
@@ -368,6 +655,8 @@ def peer(anchor, operation):
                     known_harbors(record), request["known_harbors"], [destination]
                 ),
             )
+            write_record(anchor, record)
+            return {"here": local, "record": record, **stop_vessel(anchor, record)}
         elif operation == "commit":
             if record["anchored"] or record.get("sailing_to") != destination:
                 fail("source is not sailing to this destination")
@@ -429,6 +718,8 @@ def locate(anchor, local, record, source):
             known_harbors(candidate),
             [candidate["sailing_to"]] if "sailing_to" in candidate else [],
         )
+        if reply.get("error"):
+            print(f"fm-anchor: cannot use {host}: {reply['error']}", file=sys.stderr)
         if (
             candidate["harbor"] != reply["here"]
             or reply.get("available") is not True
@@ -487,15 +778,32 @@ def sail(anchor, source, expected):
         if origin["options"] != expected["options"]:
             fail("destination directory options differ; source was not changed")
         print(
-            f"fm-anchor: sailing from {host}; all source work must already be manually stopped",
-            file=sys.stderr,
+            f"fm-anchor: stopping source work at {host} before sailing", file=sys.stderr
         )
-        prepared = remote(
-            anchor,
-            host,
-            "prepare",
-            {"expected": origin, "destination": local, "known_harbors": known},
-        )["record"]
+        deadline = time.monotonic() + 60
+        while True:
+            reply = remote(
+                anchor,
+                host,
+                "prepare",
+                {"expected": origin, "destination": local, "known_harbors": known},
+            )
+            prepared = reply["record"]
+            if reply.get("stopped") is True:
+                break
+            reason = json.dumps(
+                {"remaining": reply.get("remaining"), "errors": reply.get("errors")}
+            )
+            if not reply.get("requested") or time.monotonic() >= deadline:
+                fail(
+                    f"source work has not stopped; no data copied; retry sailing after resolving: {reason}"
+                )
+            print(
+                f"fm-anchor: waiting for the source Pi agent to stop work: {reason}",
+                file=sys.stderr,
+            )
+            origin = prepared
+            time.sleep(2)
         if (
             prepared["anchored"]
             or prepared.get("sailing_to") != local
@@ -583,13 +891,34 @@ def main():
         fail("vessels currently require Linux")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=("init", "check", "sail", "_peer", "_projects")
+        "operation",
+        choices=("init", "check", "sail", "stop", "status", "_peer", "_projects"),
     )
     parser.add_argument("--anchor", required=True)
     parser.add_argument("--from", dest="source")
     parser.add_argument("--op", choices=("inspect", "prepare", "commit"))
     args = parser.parse_args()
     anchor = anchor_path(args.anchor)
+    if args.operation in ("stop", "status"):
+        expected = validate_record(json.load(sys.stdin), anchor)
+        record = read_record(anchor)
+        if record["harbor"] != here() or record["options"] != expected["options"]:
+            fail("this vessel is not local with these directory options")
+        if args.operation == "status":
+            print(
+                json.dumps(
+                    {"record": record, "processes": vessel_processes(anchor, record)}
+                )
+            )
+        else:
+            with anchor_lock(anchor):
+                if record != read_record(anchor):
+                    fail("vessel changed before stopping; retry")
+                result = stop_vessel(anchor, record)
+                print(json.dumps(result))
+                if not result["stopped"]:
+                    sys.exit(1)
+        return
     if args.operation == "sail":
         record = sail(
             anchor, args.source, validate_record(json.load(sys.stdin), anchor)
@@ -617,9 +946,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(
-            "fm-anchor: interrupted; retry sailing at the destination", file=sys.stderr
-        )
+        print("fm-anchor: interrupted; retry the requested operation", file=sys.stderr)
         sys.exit(130)
     except (
         ValueError,

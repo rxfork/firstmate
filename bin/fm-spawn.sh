@@ -4268,6 +4268,13 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+if [ -n "${FM_ANCHOR:-}" ]; then
+  [ "$BACKEND" = tmux ] || { echo 'error: vessel workers require the tmux backend' >&2; exit 1; }
+  bash "$SCRIPT_DIR/fm-anchor.sh" check --anchor "$FM_ANCHOR" >/dev/null || {
+    echo 'error: vessel is not available for new work; a sailing operation may be stopping it' >&2
+    exit 1
+  }
+fi
 if [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
   VESSEL_PROJECTS_REAL=$(cd "$PROJECTS" && pwd -P)
   case "$(cd "$PROJ_ABS" && pwd -P)" in

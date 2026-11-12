@@ -1,6 +1,6 @@
 # Vessels
 
-This interface supports Linux anchoring, starting work and sailing a manually stopped vessel between harbors at the same physical anchor path.
+This interface supports Linux anchoring, starting work and stopping source work before sailing between harbors at the same physical anchor path.
 
 ## Terms used here
 
@@ -48,7 +48,8 @@ Missing origins and clone failures stop initialization or launch; fix the origin
 Only origin's published contents are seeded, not the source checkout's local branches, commits or uncommitted changes.
 No manifests or host provisioning tools are required.
 
-Vessel workers must use projects from the vessel's selected projects directory.
+Vessel workers require tmux and must use projects from the vessel's selected projects directory.
+New dispatch is refused while the vessel is reserved for sailing.
 Their working copies and common Git directories must remain inside the vessel, so Treehouse's Git pointers remain usable after sailing at the same physical path.
 This provisions fresh vessel repositories; it does not move or migrate existing host worktrees.
 
@@ -72,7 +73,8 @@ Harbors need distinct hostnames, and their lowercase forms must work as noninter
 Hostname components are normalized to lowercase and known harbors are deduplicated, including existing mixed-case records; SSH user name case is preserved.
 Read-only checking does not rewrite records; `sail` persists canonical routing names.
 Core is resolved remotely from `${XDG_DATA_HOME:-$HOME/.local/share}/firstmate`, independently of the development copy.
-Stop all source work manually before requesting a transfer; closing Pi alone does not prove workers or background processes have stopped.
+Sailing reserves the source, stops known work and refuses to copy while identified source processes or stop failures remain.
+Closing Pi alone does not prove that background work has stopped.
 
 ```sh
 # At an empty destination, supply only the source harbor:
@@ -84,7 +86,7 @@ bash bin/fm-anchor.sh sail --anchor /absolute/anchor
 Core tries the last-known harbor first, then known harbors, following newer hints from reachable copies of the same vessel.
 Those hints are not proof of presence: the peer must report its own anchored vessel and a usable payload.
 Conflicting discovered holders, mismatched identities and failed lookups stop rather than choosing arbitrarily or initializing a replacement.
-A local, already anchored vessel needs no network access.
+A local, already anchored vessel needs no SSH discovery; launching can still clone newly discovered projects.
 Existing local-only records remain readable without modification by `check` and `run`; explicit `sail` adds routing identity when necessary.
 
 The anchored harbor is authoritative; a registered unanchored local copy is disposable cache, not independent working state.
@@ -104,10 +106,30 @@ If every reachable hint is stale, supply a known source explicitly with `--from`
 ## Locks and stopping work
 
 The anchor lock serializes core operations; sailing holds it for the destination's transfer.
-The origin is marked inactive before copying, so a new ordinary launch cannot race the copy.
-Firstmate's existing session lock still governs the supervisor; this command adds no process-tree manager or live-writer certification.
-Stopping work is a manual prerequisite, not something these locks prove.
-Automatic stopping is not implemented.
+Source preparation reserves the vessel before stopping work, blocking new ordinary launches and worker dispatch.
+It uses the existing worker exit command, home-scoped watcher stop, validation-daemon stop without force and the vessel's private tmux server.
+An identified local primary Pi receives SIGTERM through a stable kernel process handle; its owned children must finish before copying.
+Working copies, uncommitted changes, leases and durable task records are preserved rather than torn down.
+
+Unfamiliar processes or a refused stop are sent to the existing source primary inbox for cleanup when that primary is available.
+Core launches no replacement agent or one-shot model call; the existing agent can use its normal model turn to resolve the request.
+Repeated requests to the same primary generation are deduplicated.
+Sailing retries source preparation for up to a minute while the notified agent works, then refuses if stopping is still unconfirmed.
+No copy begins on a stop refusal, and the reservation remains available for retry at that destination.
+Without a source primary, remaining work must be stopped through its own interface before retrying.
+
+```sh
+# Read-only local record and scoped process inventory, including a pending source:
+bash bin/fm-anchor.sh status --anchor /absolute/anchor
+# Request local stopping without transferring or deleting working state:
+bash bin/fm-anchor.sh stop --anchor /absolute/anchor
+```
+
+The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
+This is not certification of every possible writer: a service that clears those references may not be attributable to the vessel.
+Unknown processes are reported, not killed by name, and an unverified recorded primary prevents transfer.
+Firstmate's existing supervisor lock remains in force.
+There is no force-stop fallback, generic process manager or automatic cleanup of work.
 
 ## Verification
 

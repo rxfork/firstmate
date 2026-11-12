@@ -253,13 +253,28 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+prepare_vessel_spawn_case() {
+  local id=$1
+  FM_ANCHOR="$HOME_DIR/vessel"
+  export FM_ANCHOR
+  mkdir -p "$FM_ANCHOR"
+  (
+    unset FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
+      TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR
+    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  ) || fail 'could not initialize the fixture vessel'
+  HOME_DIR="$FM_ANCHOR/.firstmate"
+  fm_test_spawn_home "$HOME_DIR" codex
+  fm_test_spawn_brief "$HOME_DIR" "$id" 'Exercise vessel worker routing.'
+}
+
 test_vessel_workers_use_vessel_repositories() {
   local rec id out status
   local FM_ANCHOR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
   id=vessel-project-z6
   rec=$(make_settle_case vessel-project "$id" 0)
   read_settle_record "$rec"
-  export FM_ANCHOR="$TMP_ROOT/vessel-project"
+  prepare_vessel_spawn_case "$id"
   out=$(run_settle_spawn "$id")
   status=$?
   expect_code 1 "$status" "a vessel worker accepted an outside project"
@@ -273,7 +288,14 @@ test_vessel_workers_use_vessel_repositories() {
   status=$?
   expect_code 0 "$status" "vessel project could not spawn"$'\n'"$out"
   assert_grep "project=$PROJ_DIR" "$HOME_DIR/state/$id.meta" 'worker did not use its vessel clone'
-  pass 'vessel workers refuse outside projects and launch from vessel clones'
+  jq '.anchored = false' "$FM_ANCHOR/.firstmate.json" > "$FM_ANCHOR/changed"
+  mv "$FM_ANCHOR/changed" "$FM_ANCHOR/.firstmate.json"
+  fm_test_spawn_brief "$HOME_DIR" "$id-reserved" 'Reserved vessels cannot launch work.'
+  out=$(run_settle_spawn "$id-reserved")
+  status=$?
+  expect_code 1 "$status" 'a reserved vessel started new work'
+  assert_contains "$out" 'vessel is not available for new work' 'reservation refusal was not explained'
+  pass 'vessel workers use vessel clones and a sailing reservation prevents new launches'
 }
 
 test_vessel_worktrees_must_travel_with_the_vessel() {
@@ -282,7 +304,7 @@ test_vessel_worktrees_must_travel_with_the_vessel() {
   id=vessel-worktree-z7
   rec=$(make_settle_case vessel-worktree "$id" 0)
   read_settle_record "$rec"
-  export FM_ANCHOR="$TMP_ROOT/vessel-worktree"
+  prepare_vessel_spawn_case "$id"
   git clone --quiet --no-local "$PROJ_DIR" "$HOME_DIR/projects/repo"
   PROJ_DIR="$HOME_DIR/projects/repo"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"

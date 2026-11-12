@@ -8,6 +8,7 @@ rsync copies real files. No production hostname or filesystem test hooks.
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,40 @@ elif operation == "ssh":
     if (world / (host + ".fail-commit-after")).exists() and peer_operation == "commit":
         sys.exit(255)
     sys.exit(result.returncode)
+elif operation in ("control", "watch", "daemon", "tmux"):
+    with (world / "stop-calls").open("a") as log:
+        log.write(
+            json.dumps(
+                {
+                    "operation": operation,
+                    "args": args,
+                    "home": os.environ.get("FM_HOME"),
+                }
+            )
+            + "\n"
+        )
+    if operation == "control":
+        assert args == ["fixture-worker", "exit"]
+        os.kill(int((world / "worker.pid").read_text()), signal.SIGTERM)
+    elif operation == "tmux":
+        assert args[0] == "-S" and args[1].startswith(str(anchor / ".firstmate/tmux"))
+        if args[2] == "list-windows":
+            print("firstmate:fixture-worker")
+        elif args[2] == "list-panes":
+            print(
+                (world / "tmux.pid").read_text().strip()
+                + "\t"
+                + (world / "worker.pid").read_text().strip()
+                + "\tbash"
+            )
+        elif args[2] == "kill-server":
+            os.kill(int((world / "tmux.pid").read_text()), signal.SIGTERM)
+        else:
+            raise AssertionError("unexpected tmux stop operation")
+    elif operation == "daemon":
+        assert args == ["daemon", "stop"]
+    else:
+        assert args == ["--stop"]
 elif operation == "rsync":
     if (world / "fail-copy").exists():
         sys.exit(23)
