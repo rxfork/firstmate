@@ -9,7 +9,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 ## Vessel anchoring and sailing
 
 Verified on 2026-11-12 on Linux with Python 3.14.9, rsync 3.5.2-g41bbd895 (protocol 33) and Git 2.56.0.
-`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed 30 executable cases (`1..30`, `FM_TEST_COMPLETE`, `exit=0`) for local anchoring, recorded options, launch argv/status, startup gating, locks, environment forwarding and simulated harbor transfers.
+`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed 34 executable cases (`1..34`, `FM_TEST_COMPLETE`, `exit=0`) for local anchoring, recorded options, launch argv/status, startup gating, locks, environment forwarding and simulated harbor transfers.
 The sailing cases execute real core peer commands through a local SSH fixture and real local rsync copies, including a linked Git worktree with uncommitted changes, borrowed object storage in vessel cache and read-only managed Git hooks.
 They cover last-known fallback, newer hints, SSH aliases, lowercase and deduplicated harbor names, origin redirects, mismatched identities, conflicting holders, changed sources, incremental cache mirroring with deletions, failed sync retry, lost acknowledgement after origin commit, rejection of inactive caches as authoritative sources and version-1 compatibility without rewriting preferences.
 The environment case retains required agent selection, initial No-mistakes configuration, existing preferences and cumulative forwarding through nested execution.
@@ -22,6 +22,8 @@ They verify source reservation before stopping, preservation of working data and
 The worker cases also verify that a reserved vessel cannot dispatch new work.
 The outbound cases use real rsync into simulated receiver caches with inbound SSH to the source denied; they cover receiver acknowledgement loss, failed copying, activation failures, offline-source startup, returning-cache deletions, occupied/unregistered receiver refusal and invocation inside the source primary.
 A lost activation acknowledgement is retried after new destination work is written, verifying that no second copy overwrites that authoritative work.
+Scuttle cases require explicit confirmation, remove read-only hook directories without changing outside hardlinked file modes or symlink targets, refuse live work and the calling primary, and preserve an active remote vessel when deleting a local cache.
+A replaced-flock fixture verifies that a stale lock opener cannot initialize new state after the old inode is unlinked.
 
 `python3 tests/fixtures/fm-vessel-stop-pi.py <scratch-directory> rpc` passed with real Pi 1.5.0, using an isolated session and no model prompt.
 The probe verified one durable source-agent request across retries, SIGTERM termination, retained session history and an unrelated process left running.

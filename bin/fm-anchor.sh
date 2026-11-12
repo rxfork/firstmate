@@ -6,6 +6,7 @@
 #        fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR | --to HARBOR]
 #        fm-anchor.sh stop --anchor DIRECTORY
 #        fm-anchor.sh status --anchor DIRECTORY
+#        fm-anchor.sh scuttle --anchor DIRECTORY --confirm
 # Sailing uses SSH/rsync at identical physical paths. Source preparation stops
 # known work and asks the source primary to resolve unfamiliar processes.
 # Host tooling/auth remain local. fm-vessel.py owns routing, stopping and the
@@ -22,9 +23,12 @@
 # Push from a separate terminal, not from inside the primary being stopped.
 # Ordinary Firstmate retains
 # its existing session lock. Unknown or unconfirmed stops prevent copying.
+# scuttle --confirm discards only this anchor's .firstmate directory, record
+# and lock after stopping work. It makes directories owner-writable for
+# deletion, not files that may share hardlinks with outside repositories.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY\n       fm-anchor.sh status --anchor DIRECTORY\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY\n       fm-anchor.sh status --anchor DIRECTORY\n       fm-anchor.sh scuttle --anchor DIRECTORY --confirm\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nScuttle irreversibly discards all local vessel work and history; --confirm is required.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -45,6 +49,7 @@ case "$mode" in
     agent=$2
     ;;
   check|stop|status) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
+  scuttle) [ "$#" -eq 1 ] && [ "$1" = --confirm ] || { usage >&2; exit 2; } ;;
   sail)
     if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || { [ "${1:-}" != --from ] && [ "${1:-}" != --to ]; } || [ -z "${2:-}" ]; }; then
       usage >&2
@@ -89,7 +94,7 @@ done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
 snapshot=$(jq -n "${args[@]}" '{version:1, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
-if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ]; then
+if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
   printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" "$@"
   exit $?
 fi
@@ -99,6 +104,7 @@ if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
 fi
 exec 9>> "$lock"
 flock -n 9 || fail 'another anchor operation is in progress'
+[ ! -L "$lock" ] && [ "$lock" -ef /proc/self/fd/9 ] || fail 'anchor lock changed; retry the operation'
 if [ -e "$metadata" ]; then
   record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" check --anchor "$anchor") || exit 1
   if [ ! -f "$FM_CONFIG_OVERRIDE/backend" ] || [ "$(< "$FM_CONFIG_OVERRIDE/backend")" != tmux ]; then

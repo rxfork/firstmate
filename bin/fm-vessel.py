@@ -47,6 +47,13 @@ The receiver verifies it, the source commits its last-known hint, and activate
 enables the receiver. No reverse SSH or new record fields are needed.
 A lost activation acknowledgement is retried by recognizing the already active
 destination, never by overwriting it with the source's inactive cache.
+
+scuttle requires explicit --confirm and a separate terminal, stops local work,
+and removes only .firstmate plus its sibling .firstmate.json and .firstmate.lock.
+Only directories gain owner permissions; hardlinked files are unlinked without
+changing outside Git objects. Directory symlinks are never followed. The lock
+is removed last, and lock users reject stale descriptors after inode replacement.
+No remote harbor, outside repository or saved sibling archive is removed.
 """
 
 import argparse
@@ -237,6 +244,10 @@ def anchor_lock(anchor):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             fail("another anchor operation is in progress")
+        opened = os.fstat(fd)
+        current = path.stat(follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            fail("anchor lock changed; retry the operation")
         yield
     finally:
         os.close(fd)
@@ -583,10 +594,10 @@ def stop_vessel(anchor, record):
     if remaining or errors:
         if primary:
             message = (
-                "Stop work in this vessel for sailing. "
+                "A local vessel operation needs work to stop. "
                 "Stop the remaining vessel processes using their own stop commands; preserve "
                 "all repositories, worktrees, dirty files and durable task records. Do not "
-                "start new work or discard anything. The transfer will gracefully exit Pi "
+                "start new work or discard anything. Retrying the operation can request Pi shutdown "
                 "once the other work has stopped. Remaining processes: "
                 + json.dumps(remaining)
                 + "; stop errors: "
@@ -1026,6 +1037,54 @@ def sail(anchor, source, expected):
         return incoming
 
 
+def require_separate_terminal(record):
+    pid = session_pid(record)
+    if pid.isdigit() and int(pid) in ancestors(os.getpid()):
+        fail(
+            "run this operation from a separate terminal; stopping this Pi would interrupt it"
+        )
+
+
+def scuttle(anchor, expected):
+    with anchor_lock(anchor):
+        record = (
+            read_record(anchor) if (anchor / ".firstmate.json").exists() else expected
+        )
+        require_separate_terminal(record)
+        stopped = stop_vessel(anchor, record)
+        if not stopped["stopped"]:
+            fail(f"work has not stopped; vessel was not deleted: {json.dumps(stopped)}")
+
+        def writable_directories(fd):
+            # Do not chmod files: Git objects may be hardlinked to outside repos.
+            os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) | stat.S_IRWXU)
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        child = os.open(
+                            entry.name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=fd,
+                        )
+                        try:
+                            writable_directories(child)
+                        finally:
+                            os.close(child)
+
+        vessel = anchor / ".firstmate"
+        if vessel.exists():
+            fd = os.open(vessel, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                writable_directories(fd)
+            finally:
+                os.close(fd)
+            shutil.rmtree(vessel)
+        (anchor / ".firstmate.json").unlink(missing_ok=True)
+        # Last mutation under this lock; stale openers must reject its old inode.
+        (anchor / ".firstmate.lock").unlink()
+    return {"scuttled": True}
+
+
 def push(anchor, target, expected):
     local = here()
     host = harbor_name(target)
@@ -1036,11 +1095,7 @@ def push(anchor, target, expected):
         configuration = {**base_record(record), "anchored": True}
         if configuration != expected:
             fail("this vessel does not belong to this harbor with these options")
-        pid = session_pid(record)
-        if pid.isdigit() and int(pid) in ancestors(os.getpid()):
-            fail(
-                "push from a separate terminal; stopping this Pi would interrupt its own transfer"
-            )
+        require_separate_terminal(record)
         if not shutil.which("ssh") or not shutil.which("rsync"):
             fail("SSH and rsync are required for sailing")
         reply = remote(anchor, host, "inspect")
@@ -1130,9 +1185,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=("init", "check", "sail", "stop", "status", "_peer", "_projects"),
+        choices=(
+            "init",
+            "check",
+            "sail",
+            "stop",
+            "status",
+            "scuttle",
+            "_peer",
+            "_projects",
+        ),
     )
     parser.add_argument("--anchor", required=True)
+    parser.add_argument("--confirm", action="store_true")
     direction = parser.add_mutually_exclusive_group()
     direction.add_argument("--from", dest="source")
     direction.add_argument("--to", dest="target")
@@ -1140,7 +1205,14 @@ def main():
         "--op", choices=("inspect", "prepare", "commit", "receive", "activate")
     )
     args = parser.parse_args()
+    if args.operation == "scuttle" and not args.confirm:
+        parser.error("scuttle requires --confirm to discard all local vessel work")
     anchor = anchor_path(args.anchor)
+    if args.operation == "scuttle":
+        print(
+            json.dumps(scuttle(anchor, validate_record(json.load(sys.stdin), anchor)))
+        )
+        return
     if args.operation in ("stop", "status"):
         expected = validate_record(json.load(sys.stdin), anchor)
         record = read_record(anchor)

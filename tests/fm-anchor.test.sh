@@ -414,6 +414,89 @@ pushing_unknown_work_refuses_without_killing_it() (
   pass 'push uses the existing source-stop refusal and resumes without killing unknown work'
 )
 
+scuttling_requires_confirmation_and_preserves_outside_files() (
+  local anchor="$TMP_ROOT/scuttle" outside="$TMP_ROOT/scuttle-outside"
+  mkdir -p "$anchor" "$outside"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  printf 'keep\n' > "$outside/shared"
+  chmod 444 "$outside/shared"
+  chmod 500 "$outside"
+  mkdir -p "$FM_STATE_OVERRIDE/task.git-hooks"
+  printf 'hook\n' > "$FM_STATE_OVERRIDE/task.git-hooks/pre-commit"
+  chmod 500 "$FM_STATE_OVERRIDE/task.git-hooks" "$FM_STATE_OVERRIDE/task.git-hooks/pre-commit"
+  ln "$outside/shared" "$FM_HOME/cache/hardlinked"
+  ln -s "$outside" "$FM_HOME/cache/outside-link"
+  printf 'anchor sibling\n' > "$anchor/keep"
+  if bash "$ANCHOR_CLI" scuttle --anchor "$anchor" >/dev/null 2>&1; then fail 'scuttle accepted missing confirmation'; fi
+  [ -f "$FM_HOME/cache/hardlinked" ] && [ -f "$anchor/.firstmate.json" ] || fail 'unconfirmed scuttle deleted data'
+  bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --confirm >/dev/null || fail 'confirmed scuttle could not remove read-only hook directories'
+  [ ! -e "$FM_HOME" ] && [ ! -e "$anchor/.firstmate.json" ] && [ ! -e "$anchor/.firstmate.lock" ] || fail 'scuttle left vessel or metadata behind'
+  bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --confirm >/dev/null || fail 'scuttle could not handle an already empty anchor'
+  [ ! -e "$FM_HOME" ] && [ ! -e "$anchor/.firstmate.lock" ] || fail 'empty scuttle recreated lasting state'
+  [ "$(< "$outside/shared")" = keep ] && [ "$(stat -c %a "$outside/shared")" = 444 ] && [ "$(stat -c %a "$outside")" = 500 ] || fail 'scuttle followed an outside link or changed shared-file permissions'
+  [ "$(< "$anchor/keep")" = 'anchor sibling' ] || fail 'scuttle deleted unrelated anchor contents'
+  chmod 700 "$outside"
+  pass 'confirmed scuttle removes read-only vessel directories and metadata without chmodding hardlinked files or following symlinks'
+)
+
+scuttling_refuses_live_work_and_its_own_primary() (
+  local anchor="$TMP_ROOT/scuttle-refusal" writer
+  mkdir -p "$anchor"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  printf 'uncommitted\n' > "$FM_PROJECTS_OVERRIDE/work"
+  printf '%s\n' "$$" > "$FM_STATE_OVERRIDE/.lock"
+  if bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --confirm >"$TMP_ROOT/scuttle-primary-error" 2>&1; then fail 'scuttle could stop its own calling primary'; fi
+  rg -q 'separate terminal' "$TMP_ROOT/scuttle-primary-error" || fail 'scuttle did not explain the calling-primary refusal'
+  rm "$FM_STATE_OVERRIDE/.lock"
+  (cd "$FM_PROJECTS_OVERRIDE"; exec sleep 120) &
+  writer=$!
+  trap 'kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
+  if bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --confirm >/dev/null 2>&1; then fail 'scuttle deleted live unknown work'; fi
+  kill -0 "$writer" || fail 'scuttle killed an unknown process'
+  [ "$(< "$FM_PROJECTS_OVERRIDE/work")" = uncommitted ] && [ -f "$anchor/.firstmate.json" ] || fail 'refused scuttle deleted working state'
+  kill "$writer"
+  wait "$writer" 2>/dev/null || true
+  trap - EXIT
+  bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --confirm >/dev/null
+  pass 'scuttle refuses live unknown work and its calling primary without deleting data, then permits retry'
+)
+
+scuttling_a_cache_does_not_touch_other_harbors() (
+  setup_harbors scuttle-cache
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'authoritative work\n' > "$FM_PROJECTS_OVERRIDE/work"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null
+  local calls
+  calls=$(wc -l < "$FM_FIXTURE_WORLD/ssh-operations")
+  bash "$ANCHOR_CLI" scuttle --anchor "$FM_ANCHOR" --confirm >/dev/null
+  [ "$(wc -l < "$FM_FIXTURE_WORLD/ssh-operations")" = "$calls" ] || fail 'scuttle contacted a remote harbor'
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'scuttle changed the remote anchor'
+  [ "$(< "$FM_PROJECTS_OVERRIDE/work")" = 'authoritative work' ] || fail 'scuttle deleted another harbor payload'
+  pass 'scuttling removes only the local cache and leaves its active remote vessel untouched'
+)
+
+replaced_anchor_locks_are_rejected() (
+  local anchor="$TMP_ROOT/replaced-lock" fakebin="$TMP_ROOT/lock-fakebin"
+  mkdir -p "$anchor" "$fakebin"
+  configure "$anchor"
+  export FM_TEST_REAL_FLOCK FM_TEST_REPLACED_LOCK="$anchor/.firstmate.lock"
+  FM_TEST_REAL_FLOCK=$(command -v flock)
+  cat > "$fakebin/flock" <<'SH'
+#!/bin/sh
+"$FM_TEST_REAL_FLOCK" "$@" || exit
+rm -- "$FM_TEST_REPLACED_LOCK"
+: > "$FM_TEST_REPLACED_LOCK"
+SH
+  chmod +x "$fakebin/flock"
+  if PATH="$fakebin:$PATH" bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/replaced-lock-error" 2>&1; then fail 'operation accepted an unlinked old lock inode'; fi
+  rg -q 'anchor lock changed' "$TMP_ROOT/replaced-lock-error" || fail 'stale lock refusal was not explained'
+  [ ! -e "$anchor/.firstmate.json" ] && [ ! -e "$FM_HOME" ] || fail 'stale lock holder initialized state'
+  pass 'an operation that acquired a replaced lock inode refuses before mutating vessel state'
+)
+
 setup_harbors() {
   export FM_FIXTURE_WORLD="$TMP_ROOT/$1" FM_FIXTURE_HARBOR=''
   export FM_REAL_RSYNC
@@ -675,4 +758,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock

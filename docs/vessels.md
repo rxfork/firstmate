@@ -151,6 +151,23 @@ Unknown processes are reported, not killed by name, and an unverified recorded p
 Firstmate's existing supervisor lock remains in force.
 There is no force-stop fallback, generic process manager or automatic cleanup of work.
 
+## Scuttling a local vessel
+
+Scuttling irreversibly discards the local vessel, including repositories, uncommitted work, tool state and conversation history.
+Run it from a separate terminal, not from the primary being stopped.
+The personal launcher requires typing `SCUTTLE`; direct core callers must explicitly confirm:
+
+```sh
+bash bin/fm-anchor.sh scuttle --anchor /absolute/anchor --confirm
+```
+
+Core stops local work first and refuses deletion when work remains unconfirmed.
+It removes only `<anchor>/.firstmate`, `.firstmate.json` and `.firstmate.lock`, not outside repositories, other harbors or saved sibling archives.
+Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
+Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.
+The coordination lock is removed last, and competing operations must reject an old unlinked lock inode.
+There is no trash, backup or force-stop fallback.
+
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
