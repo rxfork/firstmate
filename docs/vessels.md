@@ -41,11 +41,15 @@ Every harbor must use the same physical anchor path and selected directory optio
 ## Working repositories
 
 `init` and `run` discover repositories under the anchor, skipping `.firstmate`, directory symlinks and repository contents.
-For each missing vessel project they clone its origin into the selected projects directory, preserving the source's anchor-relative path; a repository at the anchor itself uses the anchor's basename.
-Clones have independent Git storage, including when the origin is a local repository.
+For each missing vessel project they clone the local checkout's `main` branch into the selected projects directory, preserving its anchor-relative path; a repository at the anchor itself uses the anchor's basename.
+The source checkout becomes remote `local`, its original origin URL becomes remote `origin`, and `main` tracks `origin` with a main-only fetch specification.
+Seeding makes no request to origin; the first origin fetch populates its remote-tracking ref.
+Normal local cloning reuses immutable Git objects through hardlinks where possible, without borrowing an outside object directory.
+Borrowed source objects are dissociated so the vessel remains usable after outside repositories disappear.
 Existing vessel clones are left untouched, so host repositories cannot overwrite travelling work.
-Missing origins and clone failures stop initialization or launch; fix the origin and retry initialization or launch.
-Only origin's published contents are seeded, not the source checkout's local branches, commits or uncommitted changes.
+Missing origin URLs, missing local `main` branches and clone failures stop initialization or launch; fix the source checkout and retry.
+Committed local `main` history is seeded, including unpublished commits, but other branches and uncommitted changes are not.
+The `local` remote is optional convenience; ordinary vessel work uses origin, since the outside checkout may not exist on another harbor.
 No manifests or host provisioning tools are required.
 
 Vessel workers require tmux and must use projects from the vessel's selected projects directory.

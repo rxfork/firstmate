@@ -228,7 +228,7 @@ unknown_source_work_blocks_copy_without_killing_it() (
 )
 
 vessel_projects_clone_origins_only_when_missing() (
-  local anchor="$TMP_ROOT/discovered projects" origin="$TMP_ROOT/project-origin" project
+  local anchor="$TMP_ROOT/discovered projects" origin="$TMP_ROOT/project-origin" project object expected
   mkdir -p "$anchor/team" "$anchor/other"
   git init -qb main "$origin"
   printf 'from origin\n' > "$origin/file"
@@ -238,14 +238,31 @@ vessel_projects_clone_origins_only_when_missing() (
   git clone -q "$origin" "$anchor/other/repo"
   git clone -q "$origin" "$anchor/team/repo/nested"
   ln -s "$anchor/other" "$anchor/linked"
+  git -C "$anchor/team/repo" branch other
+  mv "$anchor/team/repo/.git/objects" "$TMP_ROOT/borrowed-objects"
+  mkdir -p "$anchor/team/repo/.git/objects/info"
+  printf '%s\n' "$TMP_ROOT/borrowed-objects" > "$anchor/team/repo/.git/objects/info/alternates"
+  printf 'from local main\n' > "$anchor/team/repo/file"
+  git -C "$anchor/team/repo" add file
+  git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$anchor/team/repo" commit -qm local-main
+  git -c core.hooksPath=/dev/null -C "$anchor/team/repo" checkout -q other
   printf 'host-only changes\n' > "$anchor/team/repo/file"
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   for project in team/repo other/repo; do
-    [ "$(< "$FM_PROJECTS_OVERRIDE/$project/file")" = 'from origin' ] || fail 'vessel project did not clone origin'
+    expected='from origin'
+    [ "$project" != team/repo ] || expected='from local main'
+    [ "$(< "$FM_PROJECTS_OVERRIDE/$project/file")" = "$expected" ] || fail 'vessel project did not clone local main'
+    [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" remote get-url local)" = "$anchor/$project" ] || fail 'local remote does not point at the discovered source'
+    [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" remote get-url origin)" = "$origin" ] || fail 'original origin URL was not preserved'
+    [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" config branch.main.remote)" = origin ] || fail 'main tracks the local source rather than origin'
+    [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" config remote.origin.fetch)" = '+refs/heads/main:refs/remotes/origin/main' ] || fail 'origin fetch is not limited to main'
+    if git -C "$FM_PROJECTS_OVERRIDE/$project" show-ref --verify --quiet refs/remotes/local/other; then fail 'single-branch clone copied another branch'; fi
     [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" rev-parse --path-format=absolute --git-common-dir)" = "$FM_PROJECTS_OVERRIDE/$project/.git" ] || fail 'vessel clone borrowed external Git storage'
     [ ! -e "$FM_PROJECTS_OVERRIDE/$project/.git/objects/info/alternates" ] || fail 'vessel clone borrowed external objects'
   done
+  object=$(git -C "$anchor/other/repo" rev-parse 'main^{tree}')
+  [ "$(stat -c %i "$anchor/other/repo/.git/objects/${object:0:2}/${object:2}")" = "$(stat -c %i "$FM_PROJECTS_OVERRIDE/other/repo/.git/objects/${object:0:2}/${object:2}")" ] || fail 'ordinary local clone did not reuse immutable objects'
   [ ! -e "$FM_PROJECTS_OVERRIDE/team/repo/nested" ] && [ ! -e "$FM_PROJECTS_OVERRIDE/linked" ] || fail 'discovery entered a repository or followed a directory symlink'
   printf 'travelling changes\n' > "$FM_PROJECTS_OVERRIDE/team/repo/file"
   git -C "$anchor/team/repo" remote remove origin
@@ -254,9 +271,9 @@ vessel_projects_clone_origins_only_when_missing() (
   git clone -q "$origin" "$anchor/new-repo"
   bash "$ANCHOR_CLI" run --anchor "$anchor" -- test -d "$FM_PROJECTS_OVERRIDE/new-repo/.git" || fail 'launch did not provision a newly discovered repo'
   git -c core.hooksPath=/dev/null -C "$FM_PROJECTS_OVERRIDE/team/repo" worktree add -qb worker "$TREEHOUSE_ROOT/worker"
-  rm -rf "$origin" "$anchor/team" "$anchor/other" "$anchor/new-repo"
-  [ "$(git -C "$TREEHOUSE_ROOT/worker" show HEAD:file)" = 'from origin' ] || fail 'worker still depended on outside Git storage'
-  pass 'discovery clones origins into relative vessel paths only when missing and workers use independent Git storage'
+  rm -rf "$origin" "$anchor/team" "$anchor/other" "$anchor/new-repo" "$TMP_ROOT/borrowed-objects"
+  [ "$(git -C "$TREEHOUSE_ROOT/worker" show HEAD:file)" = 'from local main' ] || fail 'worker still depended on outside Git storage'
+  pass 'missing projects clone only local main with hardlinks where possible, separate remotes and no borrowed Git storage'
 )
 
 vessel_project_failures_block_launch_and_can_retry() (
@@ -271,10 +288,13 @@ vessel_project_failures_block_launch_and_can_retry() (
   git -C "$anchor/repo" remote add origin "$origin"
   if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'failed clone was ignored'; fi
   [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'failed clone was left as an existing destination'
-  git init -q --bare "$origin"
+  printf 'available locally\n' > "$anchor/repo/file"
+  git -C "$anchor/repo" add file
+  git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$anchor/repo" commit -qm main
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   [ -d "$FM_PROJECTS_OVERRIDE/repo/.git" ] || fail 'failed provisioning could not be retried'
-  pass 'missing origins and clone failures block launch without replacing work and permit retry'
+  [ ! -e "$origin" ] || fail 'fixture unexpectedly made origin available'
+  pass 'missing origins or local main block launch, then retry clones locally without contacting the unavailable origin'
 )
 
 pushing_anchors_the_destination_without_reverse_ssh() (

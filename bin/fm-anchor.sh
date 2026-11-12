@@ -11,8 +11,9 @@
 # Host tooling/auth remain local. fm-vessel.py owns routing, stopping and the
 # prepare/copy/commit sequence; status lists the local scoped process facts.
 # init/run discover repositories under the anchor, skipping .firstmate and
-# repository contents, and clone their origins into the selected projects path
-# only when missing. Existing vessel clones are never refreshed or replaced.
+# repository contents, and clone local main into the selected projects path
+# only when missing. local points at the source; origin retains its origin URL.
+# Existing vessel clones are never refreshed or replaced.
 # Core supplies the portable environment; callers choose the runtime command.
 # .firstmate.json records this harbor, physical anchor and selected paths.
 # run checks that exact configuration and anchored=true before exec.

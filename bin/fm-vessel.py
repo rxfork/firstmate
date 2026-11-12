@@ -319,12 +319,45 @@ def provision_projects(anchor, record):
             [
                 "git",
                 "clone",
-                "--no-local",
+                "--single-branch",
+                "--branch",
+                "main",
+                "--origin",
+                "local",
+                "--dissociate",
                 "--",
-                origin.stdout.strip(),
+                str(source),
                 str(destination),
             ],
             cwd=source,
+            stdout=sys.stderr,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(destination),
+                "remote",
+                "add",
+                "--track",
+                "main",
+                "origin",
+                origin.stdout.strip(),
+            ],
+            stdout=sys.stderr,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(destination),
+                "config",
+                "--local",
+                "branch.main.remote",
+                "origin",
+            ],
             stdout=sys.stderr,
             check=True,
         )
