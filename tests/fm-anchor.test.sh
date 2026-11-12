@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local anchoring only: exercise the CLI, its metadata and the launch boundary.
+# Exercise anchoring, simulated harbor transfers and the CLI launch contract.
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -30,7 +30,7 @@ local_anchor_records_options_and_preserves_argv() (
   mkdir -p "$anchor"
   configure "$anchor"
   result=$(bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi)
-  jq -e --arg anchor "$anchor" --arg harbor "$(uname -n)" '.version == 1 and .anchored == true and .anchor == $anchor and .harbor == $harbor and .backend == "tmux"' <<< "$result" >/dev/null || fail 'anchor identity was not recorded'
+  jq -e --arg anchor "$anchor" --arg harbor "$(uname -n)" '.version == 2 and (.vessel_id | length > 0) and .anchored == true and .anchor == $anchor and .harbor == $harbor and .last_known_harbor == $harbor and .known_harbors == [$harbor] and .backend == "tmux"' <<< "$result" >/dev/null || fail 'anchor identity was not recorded'
   [ "$(< "$FM_CONFIG_OVERRIDE/backend")" = tmux ] || fail 'selected backend was not initialized'
   jq -e --arg home "$FM_HOME" '.options.FM_HOME == $home' "$anchor/.firstmate.json" >/dev/null || fail 'boarding paths were not snapshotted'
   bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c 'printf "%s\0" "$@" > "$1"; exit 37' bash "$TMP_ROOT/argv" 'a model' '' 'literal ; argument' || rc=$?
@@ -82,18 +82,24 @@ anchor_operations_use_one_regular_lock() (
   local anchor="$TMP_ROOT/locked" rc=0
   mkdir -p "$anchor"
   configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   exec 8> "$anchor/.firstmate.lock"
   flock -n 8
   if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'another operation bypassed the anchor lock'; fi
+  if bash "$ANCHOR_CLI" sail --anchor "$anchor" >/dev/null 2>&1; then fail 'sailing bypassed the anchor lock'; fi
   exec 8>&-
   rm "$anchor/.firstmate.lock"
   mkfifo "$anchor/.firstmate.lock"
   timeout 5 bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 1 ] || fail 'FIFO lock did not refuse promptly'
+  rc=0
+  timeout 5 bash "$ANCHOR_CLI" sail --anchor "$anchor" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail 'sailing did not refuse a FIFO lock promptly'
   rm "$anchor/.firstmate.lock"
   printf 'keep\n' > "$TMP_ROOT/unrelated"
   ln -s "$TMP_ROOT/unrelated" "$anchor/.firstmate.lock"
   if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'symlink was treated as an anchor lock'; fi
+  if bash "$ANCHOR_CLI" sail --anchor "$anchor" >/dev/null 2>&1; then fail 'sailing followed a symlink anchor lock'; fi
   [ "$(< "$TMP_ROOT/unrelated")" = keep ] || fail 'anchor lock modified an unrelated file'
   pass 'anchor operations serialize with a regular lock and reject file aliases'
 )
@@ -133,4 +139,216 @@ core_environment_composes_forwarding_layers() (
   pass 'core exports portable defaults and appends forwarding names without losing caller additions'
 )
 
-fm_test_run core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+setup_harbors() {
+  export FM_FIXTURE_WORLD="$TMP_ROOT/$1" FM_FIXTURE_HARBOR=''
+  export FM_REAL_RSYNC
+  FM_REAL_RSYNC=$(command -v rsync)
+  mkdir -p "$FM_FIXTURE_WORLD/fakebin"
+  for host in desktop laptop third; do
+    mkdir -p "$FM_FIXTURE_WORLD/hosts/$host/anchor" "$FM_FIXTURE_WORLD/hosts/$host/home/.local/share"
+    ln -s "$ROOT" "$FM_FIXTURE_WORLD/hosts/$host/home/.local/share/firstmate"
+  done
+  for tool in ssh rsync uname; do
+    printf '#!/bin/sh\nexec python3 "%s" %s "$@"\n' "$ROOT/tests/fixtures/fm-vessel-harbors.py" "$tool" > "$FM_FIXTURE_WORLD/fakebin/$tool"
+    chmod +x "$FM_FIXTURE_WORLD/fakebin/$tool"
+  done
+  export PATH="$FM_FIXTURE_WORLD/fakebin:$PATH"
+  configure "$FM_FIXTURE_WORLD/anchor with spaces"
+  activate_harbor desktop
+}
+
+activate_harbor() {
+  if [ -n "$FM_FIXTURE_HARBOR" ]; then
+    mv "$FM_ANCHOR" "$FM_FIXTURE_WORLD/hosts/$FM_FIXTURE_HARBOR/anchor"
+  fi
+  mv "$FM_FIXTURE_WORLD/hosts/$1/anchor" "$FM_ANCHOR"
+  export FM_FIXTURE_HARBOR=$1
+}
+
+sailing_copies_and_redirects_origin() (
+  setup_harbors sailing
+  local identity
+  identity=$(bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi | jq -r .vessel_id)
+  printf 'uncommitted work\n' > "$FM_HOME/projects/work"
+  mkdir -p "$FM_HOME/pi/primary"
+  printf 'conversation\n' > "$FM_HOME/pi/primary/session.jsonl"
+  printf 'old socket\n' > "$FM_HOME/tmux/socket"
+  mkdir -p "$FM_HOME/state/task.git-hooks"
+  printf '#!/bin/sh\nexit 0\n' > "$FM_HOME/state/task.git-hooks/pre-commit"
+  chmod 500 "$FM_HOME/state/task.git-hooks/pre-commit" "$FM_HOME/state/task.git-hooks"
+  git init -q "$FM_HOME/projects/repo"
+  printf 'tracked\n' > "$FM_HOME/projects/repo/file"
+  git -C "$FM_HOME/projects/repo" add file
+  git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$FM_HOME/projects/repo" commit -qm initial
+  mv "$FM_HOME/projects/repo/.git/objects" "$XDG_CACHE_HOME/git-objects"
+  mkdir -p "$FM_HOME/projects/repo/.git/objects/info"
+  printf '%s\n' "$XDG_CACHE_HOME/git-objects" > "$FM_HOME/projects/repo/.git/objects/info/alternates"
+  git -c core.hooksPath=/dev/null -C "$FM_HOME/projects/repo" worktree add -qb task "$TREEHOUSE_ROOT/task"
+  printf 'uncommitted\n' > "$TREEHOUSE_ROOT/task/file"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null
+  [ "$(< "$FM_HOME/projects/work")" = 'uncommitted work' ] || fail 'sailing lost working data'
+  [ "$(< "$FM_HOME/pi/primary/session.jsonl")" = conversation ] || fail 'sailing lost primary history'
+  [ ! -e "$FM_HOME/tmux/socket" ] || fail 'sailing copied host runtime sockets'
+  [ "$(git -C "$TREEHOUSE_ROOT/task" status --porcelain)" = ' M file' ] && [ "$(< "$TREEHOUSE_ROOT/task/file")" = uncommitted ] || fail 'linked Git worktree or uncommitted changes were lost'
+  [ -x "$FM_HOME/state/task.git-hooks/pre-commit" ] && [ "$(stat -c %a "$FM_HOME/state/task.git-hooks")" = 500 ] || fail 'managed Git hook permissions changed'
+  jq -e --arg id "$identity" '.vessel_id == $id and .anchored and .harbor == "laptop" and .last_known_harbor == "laptop" and (.known_harbors | sort) == ["desktop","laptop"]' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'arrival did not record identity and harbors'
+  jq -e '.anchored == false and .last_known_harbor == "laptop"' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'origin still permits local launch'
+  [ -f "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate/projects/work" ] || fail 'sailing deleted origin data'
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'arrived vessel cannot launch'
+  chmod u+w "$FM_HOME/state/task.git-hooks" "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate/state/task.git-hooks"
+  pass 'core copies a stopped vessel at the same path and redirects its origin before arrival'
+)
+
+sailing_follows_hints_and_preserves_old_copies() (
+  setup_harbors hints
+  local previous
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'original\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null
+  activate_harbor third
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from laptop >/dev/null
+  printf 'latest\n' > "$FM_HOME/projects/work"
+  activate_harbor desktop
+  : > "$FM_FIXTURE_WORLD/calls"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  [ "$(head -n 1 "$FM_FIXTURE_WORLD/calls")" = laptop ] || fail 'last-known harbor was not queried first'
+  [ "$(< "$FM_HOME/projects/work")" = latest ] || fail 'newer harbor hints did not locate the vessel'
+  previous=("$FM_ANCHOR"/.firstmate.previous.*)
+  [ "${#previous[@]}" -eq 1 ] && [ "$(< "${previous[0]}/projects/work")" = original ] || fail 'old local working data was overwritten'
+  jq -e '(.known_harbors | sort) == ["desktop","laptop","third"] and .anchored' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'known harbors did not converge'
+  pass 'sailing follows newer hints and archives old local copies without deleting work'
+)
+
+failed_copy_can_retry_without_launching() (
+  setup_harbors copy-failure
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'keep\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'failed rsync reported success'; fi
+  jq -e '.anchored == false' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'failed copy activated the destination'
+  jq -e '.anchored == false and .sailing_to == "laptop"' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'source was not reserved for retry'
+  if bash "$ANCHOR_CLI" run --anchor "$FM_ANCHOR" -- touch "$FM_FIXTURE_WORLD/launched" >/dev/null 2>&1; then fail 'failed arrival launched work'; fi
+  [ ! -e "$FM_FIXTURE_WORLD/launched" ] || fail 'failed arrival ran its command'
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  [ "$(< "$FM_HOME/projects/work")" = keep ] || fail 'retry did not recover source data'
+  pass 'failed copies leave both ends inactive and retry at the same destination'
+)
+
+lost_origin_ack_does_not_activate_destination() (
+  setup_harbors ack-failure
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/desktop.fail-commit-after"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'lost origin acknowledgement reported success'; fi
+  jq -e '.anchored == false' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'destination activated without origin acknowledgement'
+  jq -e '.anchored == false and .last_known_harbor == "laptop" and (has("sailing_to") | not)' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'fixture did not commit before losing its acknowledgement'
+  rm "$FM_FIXTURE_WORLD/desktop.fail-commit-after"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'committed origin could not be retried'
+  pass 'lost origin acknowledgement keeps arrival inactive and permits a safe retry'
+)
+
+sailing_falls_back_when_last_known_is_unreachable() (
+  setup_harbors fallback
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  jq '.harbor="laptop" | .anchored=false | .last_known_harbor="offline" | .known_harbors=["desktop","laptop","offline"]' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  [ "$(head -n 1 "$FM_FIXTURE_WORLD/calls")" = offline ] || fail 'last-known harbor was not attempted'
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'known harbor fallback did not arrive'
+  pass 'an unreachable last-known harbor falls back to another known harbor'
+)
+
+sailing_never_adopts_an_unrelated_vessel() (
+  setup_harbors wrong-vessel
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  jq '.harbor="laptop" | .anchored=false | .known_harbors=["desktop","laptop"]' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json"
+  jq '.vessel_id="12345678-1234-4234-8234-123456789abc"' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/changed"
+  mv "$FM_FIXTURE_WORLD/changed" "$FM_ANCHOR/.firstmate.json"
+  activate_harbor laptop
+  mkdir -p "$FM_HOME"
+  printf 'keep local work\n' > "$FM_HOME/local-work"
+  cp "$FM_ANCHOR/.firstmate.json" "$FM_FIXTURE_WORLD/before"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null 2>&1; then fail 'another vessel was adopted at the same path'; fi
+  cmp -s "$FM_ANCHOR/.firstmate.json" "$FM_FIXTURE_WORLD/before" || fail 'failed lookup changed local hints'
+  [ "$(< "$FM_HOME/local-work")" = 'keep local work' ] || fail 'failed lookup overwrote local work'
+  pass 'failed identity lookup preserves local work and never creates a replacement vessel'
+)
+
+sailing_refuses_conflicting_anchored_copies() (
+  setup_harbors conflict
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  jq '.harbor="laptop" | .anchored=false | .last_known_harbor="offline" | .known_harbors=["desktop","laptop","third","offline"]' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json"
+  jq '.harbor="third" | .last_known_harbor="third" | .known_harbors=["desktop","laptop","third"]' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate.json"
+  "$FM_REAL_RSYNC" -a "$FM_HOME/" "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate/"
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null 2>&1; then fail 'conflicting anchored copies were chosen arbitrarily'; fi
+  jq -e '.anchored' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'conflict deactivated an origin'
+  jq -e '.anchored' "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate.json" >/dev/null || fail 'conflict deactivated another origin'
+  [ ! -e "$FM_HOME" ] || fail 'conflict copied a payload'
+  pass 'conflicting anchored copies stop discovery without choosing or deactivating either'
+)
+
+sailing_refuses_source_changes_before_copy() (
+  setup_harbors changed-source
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/desktop.change-source"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'changed origin was copied'; fi
+  jq -e '.anchored and (.known_harbors | index("unseen") != null)' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'source-change fixture did not run or source was deactivated'
+  [ ! -e "$FM_ANCHOR/.firstmate.json" ] && [ ! -e "$FM_HOME" ] || fail 'changed source created local vessel state'
+  pass 'a changed source is rejected before copying or deactivating it'
+)
+
+legacy_local_anchors_can_sail_without_rewriting_preferences() (
+  setup_harbors legacy
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'agent: codex\n' > "$NM_HOME/config.yaml"
+  jq 'del(.vessel_id,.last_known_harbor,.known_harbors) | .version=1' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/legacy"
+  cp "$FM_FIXTURE_WORLD/legacy" "$FM_ANCHOR/.firstmate.json"
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null
+  cmp -s "$FM_ANCHOR/.firstmate.json" "$FM_FIXTURE_WORLD/legacy" || fail 'ordinary checking migrated a legacy record'
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null
+  jq -e '.version == 2 and (.vessel_id | length > 0)' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'explicit sailing did not add routing identity'
+  [ "$(< "$NM_HOME/config.yaml")" = 'agent: codex' ] || fail 'sailing rewrote existing agent preferences'
+  pass 'existing local records upgrade only on explicit sailing and preserve tool preferences'
+)
+
+sailing_does_not_confuse_ssh_aliases_with_multiple_holders() (
+  setup_harbors aliases
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  jq '.harbor="laptop" | .anchored=false | .last_known_harbor="offline" | .known_harbors=["desktop","work","laptop","offline"]' "$FM_ANCHOR/.firstmate.json" > "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'SSH aliases were treated as conflicting holders'
+  pass 'multiple SSH names for one harbor do not create a false conflict'
+)
+
+pending_arrival_never_exports_its_previous_payload() (
+  setup_harbors pending-arrival
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'old copy\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null
+  activate_harbor desktop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  printf 'latest work\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/desktop.fail-commit-after"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null 2>&1; then fail 'lost acknowledgement reported arrival'; fi
+  activate_harbor desktop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null 2>&1; then fail 'pending destination exported its old payload as the latest vessel'; fi
+  [ "$(< "$FM_HOME/projects/work")" = 'latest work' ] || fail 'latest origin data was replaced by an old destination copy'
+  activate_harbor laptop
+  rm "$FM_FIXTURE_WORLD/desktop.fail-commit-after"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null
+  [ "$(< "$FM_HOME/projects/work")" = 'latest work' ] || fail 'pending arrival did not recover the latest data'
+  pass 'an unfinished arrival cannot export its previous local payload as current work'
+)
+
+fm_test_run pending_arrival_never_exports_its_previous_payload sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_preserves_old_copies failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock

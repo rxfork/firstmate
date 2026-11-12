@@ -6,13 +6,15 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
-## Local vessel anchoring
+## Vessel anchoring and sailing
 
-Verified on 2026-11-11 on Linux.
-`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed six executable cases (`1..6`, `FM_TEST_COMPLETE`) for initialization, physical paths, recorded options, launch argv/status, startup gating, the short anchor lock and layered environment defaults.
-The environment case checks required agent selection, initial No-mistakes configuration, preservation of existing preferences, cumulative forwarding additions, required core names with an empty incoming list, and retained names through nested execution.
-These tests execute the core command without opening a tmux pane or running Pi/Nono interactively.
-These results do not prove all writers have stopped; [local vessels](../vessels.md) owns the supported scope.
+Verified on 2026-11-12 on Linux with Python 3.14.9, rsync 3.5.2-g41bbd895 (protocol 33) and Git 2.56.0.
+`bash bin/fm-test-run.sh tests/fm-anchor.test.sh` passed 17 executable cases (`1..17`, `FM_TEST_COMPLETE`, `exit=0`) for local anchoring, recorded options, launch argv/status, startup gating, locks, environment forwarding and simulated harbor transfers.
+The sailing cases execute real core peer commands through a local SSH fixture and real local rsync copies, including a linked Git worktree with uncommitted changes, borrowed object storage in vessel cache and read-only managed Git hooks.
+They cover last-known fallback, newer hints, SSH aliases, origin redirects, mismatched identities, conflicting holders, changed sources, preserved previous copies, failed copy retry, lost acknowledgement after origin commit, rejection of an unfinished arrival's old payload and version-1 compatibility without rewriting preferences.
+The environment case retains required agent selection, initial No-mistakes configuration, existing preferences and cumulative forwarding through nested execution.
+These results are not live SSH transfer, interactive Pi/Nono or tmux-pane verification and do not prove all writers have stopped.
+[Vessels](../vessels.md) owns the supported scope and manual stopping prerequisite.
 
 ## Polytoken worker lifecycle
 

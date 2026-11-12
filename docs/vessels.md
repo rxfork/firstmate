@@ -1,6 +1,6 @@
-# Local vessels
+# Vessels
 
-This interface supports local Linux anchoring and starting work, not moving between harbors.
+This interface supports Linux anchoring, starting work and sailing a manually stopped vessel between harbors at the same physical anchor path.
 
 ## Terms used here
 
@@ -27,7 +27,8 @@ Initialization requires `--agent NAME` and a fresh vessel; it never adopts nonem
 It creates the selected directories, records the backend, writes the selected No-mistakes agent to `$NM_HOME/config.yaml` and writes `.firstmate.json` beside the vessel.
 The name must be a No-mistakes-supported agent identifier; syntactically it uses lowercase letters, digits and hyphens, starting with a letter.
 Reinitialization and later launches preserve existing preferences; no agent is guessed or rewritten during startup.
-That small record contains the physical anchor, local harbor, anchored flag and selected directory options; it contains no credentials or arbitrary runtime arguments.
+That small record contains the physical anchor, local harbor, anchored flag, selected directory options and routing hints; it contains no credentials or arbitrary runtime arguments.
+`bin/fm-vessel.py` owns the versioned record and transfer sequence.
 Subsequent launches require the same recorded configuration and an anchored vessel at this harbor.
 A raised flag, foreign harbor, backend mismatch or path change refuses before the supplied command starts; boarding never repairs metadata silently.
 
@@ -35,6 +36,7 @@ The caller's normal layout keeps Firstmate state/config/projects, Treehouse work
 Host tooling, preferences and authentication remain host inputs.
 These checks cover selected directory settings, not every possible reference inside application configuration or Git storage.
 There is no automatic state collection, path rewriting or backend conversion.
+Every harbor must use the same physical anchor path and selected directory options.
 
 ## Environment layers
 
@@ -44,20 +46,52 @@ The tmux socket directory and cache are always vessel-local, and ambient multipl
 `run` exports the resolved environment before executing its command, so Nono and Pi inherit it without shell sourcing or `eval`.
 
 `FM_WORKER_ENV_FORWARD` is one cumulative, whitespace-separated list of variable names.
-Personal environment configuration can append names; core appends its required portable runtime names while preserving those additions.
+Personal environment configuration supplies names; core appends its required portable runtime names while preserving those additions.
 An empty or unset incoming list does not disable core's forwarding.
 Nested execution retains the same names; repeated names are harmless.
 The existing worker launcher copies the selected current values (or clears selected unset values), then removes the forwarding control list from the worker itself.
 
+## Sailing
+
+Install matching core, Python 3.9+, SSH and rsync on both harbors.
+Harbors need distinct hostnames, and those returned by `uname -n` must work as noninteractive SSH destinations using ordinary host configuration.
+Core is resolved remotely from `${XDG_DATA_HOME:-$HOME/.local/share}/firstmate`, independently of the development copy.
+Stop all source work manually before requesting a transfer; closing Pi alone does not prove workers or background processes have stopped.
+
+```sh
+# At an empty destination, supply only the source harbor:
+bash bin/fm-anchor.sh sail --anchor /absolute/anchor --from desktop
+# Returning to a previously visited harbor discovers the current location:
+bash bin/fm-anchor.sh sail --anchor /absolute/anchor
+```
+
+Core tries the last-known harbor first, then known harbors, following newer hints from reachable copies of the same vessel.
+Those hints are not proof of presence: the peer must report its own anchored vessel and a usable payload.
+Conflicting discovered holders, mismatched identities and failed lookups stop rather than choosing arbitrarily or initializing a replacement.
+A local, already anchored vessel needs no network access.
+Existing local-only records remain readable without modification by `check` and `run`; explicit `sail` adds routing identity when necessary.
+
+Core invokes rsync directly into a private staging directory, updates the origin and enables the destination only after copying and the origin's acknowledgement succeed.
+Host tools, authentication, tmux sockets and the old primary-session lock are not transported.
+Durable state, repositories, linked Git worktrees, uncommitted changes and primary conversations are copied without rewriting paths or preferences.
+Vessel-local cache is retained because repositories can reference object storage there.
+Other persisted runtime records are left to ordinary Firstmate recovery; transfer does not resume worker processes.
+The origin's payload is retained, and any previous destination payload is renamed to `.firstmate.previous.*` rather than overwritten or deleted.
+Failed copies remain under `.firstmate.sailing.*`; these saved copies are not automatically collected.
+After interruption, retry `sail` at the destination; copy or origin-acknowledgement failure keeps that destination inactive and never falls through to initialization.
+If every reachable hint is stale, supply a known source explicitly with `--from` rather than guessing or creating a replacement.
+
 ## Locks and stopping work
 
-The anchor lock only serializes initialization and startup checks.
+The anchor lock serializes core operations; sailing holds it for the destination's transfer.
+The origin is marked inactive before copying, so a new ordinary launch cannot race the copy.
 Firstmate's existing session lock still governs the supervisor; this command adds no process-tree manager or live-writer certification.
-Closing the visible interface does not prove background work has stopped.
-Stopping work is manual; transfer and automated raising of the anchor are not implemented here.
+Stopping work is a manual prerequisite, not something these locks prove.
+Automatic stopping is not implemented.
 
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The core cases also exercise portable environment defaults, cumulative forwarding, empty incoming lists and nested execution.
+The core cases also exercise portable environment defaults, cumulative forwarding, empty incoming lists, nested execution and simulated multi-harbor sailing.
+The harbor fixtures execute real core peer commands and real local rsync copies without accessing live vessels or SSH servers.
 Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

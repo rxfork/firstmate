@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# Anchor one local vessel; no transfer, process manager or configuration audit.
+# Anchor or sail a vessel; no process manager or live-writer certification.
 # Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME
 #        fm-anchor.sh check --anchor DIRECTORY
 #        fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]
+#        fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]
+# Sailing uses SSH/rsync at identical physical paths and requires manually
+# stopped source work. Host tooling/auth remain local. Routing and the peer
+# prepare/copy/commit sequence are owned by fm-vessel.py.
 # Core supplies the portable environment; callers choose the runtime command.
 # .firstmate.json records this harbor, physical anchor and selected paths.
-# run checks that exact configuration and anchored=true before exec. The short
-# .firstmate.lock serializes initialization/checks, not the lifetime of writers;
-# ordinary Firstmate retains its existing session lock. Stopping work is manual.
+# run checks that exact configuration and anchored=true before exec.
+# .firstmate.lock serializes core operations, not the lifetime of writers;
+# sailing holds the destination lock until arrival. Ordinary Firstmate retains
+# its existing session lock. Stopping work is manual.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n'; }
-case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]\nSailing requires identical physical anchor paths, SSH/rsync and manually stopped source work.\n'; }
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  _peer)
+    exec python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$@"
+    ;;
+esac
 [ "$#" -ge 3 ] || { usage >&2; exit 2; }
 mode=$1; shift
 [ "$1" = --anchor ] || { usage >&2; exit 2; }
@@ -26,6 +36,12 @@ case "$mode" in
     agent=$2
     ;;
   check) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
+  sail)
+    if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "${1:-}" != --from ]; }; then
+      usage >&2
+      exit 2
+    fi
+    ;;
   run) [ "$#" -ge 2 ] && [ "$1" = -- ] || { usage >&2; exit 2; }; shift ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -64,6 +80,10 @@ done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
 snapshot=$(jq -n "${args[@]}" '{version:1, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
+if [ "$mode" = sail ]; then
+  printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" sail --anchor "$anchor" "$@"
+  exit $?
+fi
 lock="$anchor/.firstmate.lock"
 if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
   fail 'anchor lock must be a regular file'
@@ -71,9 +91,7 @@ fi
 exec 9>> "$lock"
 flock -n 9 || fail 'another anchor operation is in progress'
 if [ -e "$metadata" ]; then
-  if [ ! -f "$metadata" ] || ! jq -se --argjson expected "$snapshot" '. == [$expected]' "$metadata" >/dev/null; then
-    fail 'vessel is not anchored here with these options; metadata was not changed'
-  fi
+  record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" check --anchor "$anchor") || exit 1
   if [ ! -f "$FM_CONFIG_OVERRIDE/backend" ] || [ "$(< "$FM_CONFIG_OVERRIDE/backend")" != tmux ]; then
     fail 'vessel backend configuration changed'
   fi
@@ -85,14 +103,10 @@ elif [ "$mode" = init ]; then
   mkdir -p -- "${directories[@]}"
   printf 'tmux\n' > "$FM_CONFIG_OVERRIDE/backend"
   printf 'agent: "%s"\n' "$agent" > "$NM_HOME/config.yaml"
-  temporary=$(mktemp "$anchor/.firstmate.json.XXXXXX")
-  trap 'rm -f -- "$temporary"' EXIT
-  printf '%s\n' "$snapshot" > "$temporary"
-  mv -- "$temporary" "$metadata"
-  trap - EXIT
+  record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" init --anchor "$anchor")
 else
   fail 'vessel is not anchored; initialize it explicitly first'
 fi
-if [ "$mode" != run ]; then printf '%s\n' "$snapshot"; exit 0; fi
+if [ "$mode" != run ]; then printf '%s\n' "$record"; exit 0; fi
 exec 9>&-
 exec "$@"
