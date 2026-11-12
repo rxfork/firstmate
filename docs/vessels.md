@@ -81,9 +81,11 @@ Closing Pi alone does not prove that background work has stopped.
 bash bin/fm-anchor.sh sail --anchor /absolute/anchor --from desktop
 # Returning to a previously visited harbor discovers the current location:
 bash bin/fm-anchor.sh sail --anchor /absolute/anchor
+# From a separate terminal on the source, send the vessel before going offline:
+bash bin/fm-anchor.sh sail --anchor /absolute/anchor --to desktop
 ```
 
-Core tries the last-known harbor first, then known harbors, following newer hints from reachable copies of the same vessel.
+Without `--to`, core tries the last-known harbor first, then known harbors, following newer hints from reachable copies of the same vessel.
 Those hints are not proof of presence: the peer must report its own anchored vessel and a usable payload.
 Conflicting discovered holders, mismatched identities and failed lookups stop rather than choosing arbitrarily or initializing a replacement.
 A local, already anchored vessel needs no SSH discovery; launching can still clone newly discovered projects.
@@ -103,9 +105,23 @@ The sibling record and lock, other anchor contents and saved copies from earlier
 After interruption, retry `sail` at the destination; copy or origin-acknowledgement failure keeps that destination inactive and never falls through to initialization.
 If every reachable hint is stale, supply a known source explicitly with `--from` rather than guessing or creating a replacement.
 
+### Sending before the source goes offline
+
+`--to HARBOR` initiates the transfer at the authoritative source, using only outbound SSH and rsync to the destination.
+Both harbors must be online during transfer, with matching core installed and the same physical anchor directory already present.
+Run it from a separate terminal, outside the source Pi session; stopping that session must not kill its own transfer command.
+The receiver reserves an inactive cache, source work stops, and the payload is mirrored using the same exclusions as pulling.
+Only after verification and source acknowledgement does the destination become anchored.
+Wait for success before taking the source offline; the destination can then launch locally without contacting it.
+
+Push failures retain the source payload and any receiving cache for retry with the same `--to` target.
+If activation succeeded but its acknowledgement was lost, retry recognizes the active destination without copying over its newer work.
+An arbitrary inactive source cache cannot be pushed to a new harbor, and an unrelated or already anchored destination is never replaced.
+There is no offline queue, reverse SSH requirement, automatic remote installation or replacement-vessel initialization.
+
 ## Locks and stopping work
 
-The anchor lock serializes core operations; sailing holds it for the destination's transfer.
+The anchor lock serializes core operations; pulling holds the destination lock and pushing holds the source lock through transfer.
 Source preparation reserves the vessel before stopping work, blocking new ordinary launches and worker dispatch.
 It uses the existing worker exit command, home-scoped watcher stop, validation-daemon stop without force and the vessel's private tmux server.
 An identified local primary Pi receives SIGTERM through a stable kernel process handle; its owned children must finish before copying.

@@ -3,7 +3,7 @@
 # Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME
 #        fm-anchor.sh check --anchor DIRECTORY
 #        fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]
-#        fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]
+#        fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR | --to HARBOR]
 #        fm-anchor.sh stop --anchor DIRECTORY
 #        fm-anchor.sh status --anchor DIRECTORY
 # Sailing uses SSH/rsync at identical physical paths. Source preparation stops
@@ -17,11 +17,13 @@
 # .firstmate.json records this harbor, physical anchor and selected paths.
 # run checks that exact configuration and anchored=true before exec.
 # .firstmate.lock serializes core operations, not the lifetime of writers;
-# sailing holds the destination lock until arrival. Ordinary Firstmate retains
+# pulling holds the destination lock, pushing the source lock, until arrival.
+# Push from a separate terminal, not from inside the primary being stopped.
+# Ordinary Firstmate retains
 # its existing session lock. Unknown or unconfirmed stops prevent copying.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY\n       fm-anchor.sh status --anchor DIRECTORY\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY\n       fm-anchor.sh run --anchor DIRECTORY -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY\n       fm-anchor.sh status --anchor DIRECTORY\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -43,7 +45,7 @@ case "$mode" in
     ;;
   check|stop|status) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   sail)
-    if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "${1:-}" != --from ]; }; then
+    if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || { [ "${1:-}" != --from ] && [ "${1:-}" != --to ]; } || [ -z "${2:-}" ]; }; then
       usage >&2
       exit 2
     fi

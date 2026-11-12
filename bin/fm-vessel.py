@@ -28,8 +28,8 @@ and no-mistakes daemon stop without force. A verified vessel-local primary Pi
 receives SIGTERM through a pidfd; its owned children and private tmux server
 must finish before copy. Unfamiliar processes and refused stops are reported
 through the existing primary inbox, once per primary process generation.
-prepare releases its lock between destination retries, allowing the primary
-to finish cleanup. Sailing waits up to 60 seconds for that coordination before
+Pull preparation releases its lock between destination retries, allowing the
+primary to finish cleanup. Sailing waits up to 60 seconds for coordination before
 refusing without a copy. The source remains reserved for the same retry.
 
 status lists accessible same-user /proc cwd/environment matches against vessel
@@ -39,6 +39,14 @@ clears its environment and leaves the vessel may not be attributable here.
 Known but unverified primary ownership or remaining processes prevent transfer.
 Only Pi is signalled directly; there is no name-pattern kill, force stop,
 teardown, worktree return, or cleanup of unlanded work.
+
+--to initiates an outbound-only push from a separate source terminal, holding
+its anchor lock through handoff. receive reserves an inactive destination
+before source stopping; shared preparation and rsync then copy the payload.
+The receiver verifies it, the source commits its last-known hint, and activate
+enables the receiver. No reverse SSH or new record fields are needed.
+A lost activation acknowledgement is retried by recognizing the already active
+destination, never by overwriting it with the source's inactive cache.
 """
 
 import argparse
@@ -604,6 +612,112 @@ def stop_vessel(anchor, record):
     }
 
 
+def prepare_source(anchor, record, destination, known):
+    if not shutil.which("rsync"):
+        fail("rsync is required on the source harbor")
+    retry = not record["anchored"] and (
+        record.get("sailing_to") == destination
+        or (
+            "sailing_to" not in record
+            and record.get("last_known_harbor") == destination
+        )
+    )
+    if not record["anchored"] and not retry:
+        fail("vessel is not available for this destination")
+    check_payload(anchor, record)
+    record = with_routing(record)
+    record.update(
+        anchored=False,
+        sailing_to=destination,
+        known_harbors=merge_harbors(known_harbors(record), known, [destination]),
+    )
+    write_record(anchor, record)
+    return {"record": record, **stop_vessel(anchor, record)}
+
+
+def commit_source(anchor, record, destination):
+    if record["anchored"] or record.get("sailing_to") != destination:
+        fail("source is not sailing to this destination")
+    record = {**record, "last_known_harbor": destination}
+    record.pop("sailing_to")
+    write_record(anchor, record)
+    return record
+
+
+def check_receiver(record, source, local):
+    if source["version"] != 2 or source["harbor"] == local:
+        fail("receiving requires another harbor's identified vessel")
+    if record is not None:
+        if (
+            record["harbor"] != local
+            or record["anchored"]
+            or record.get("vessel_id") != source["vessel_id"]
+            or record["options"] != source["options"]
+        ):
+            fail("destination is anchored, unrelated or configured differently")
+        if "sailing_to" in record and not (
+            record["sailing_to"] == local
+            and record["last_known_harbor"] == source["harbor"]
+        ):
+            fail("destination is reserved for another handoff")
+    if (
+        not source["anchored"]
+        and source.get("sailing_to") != local
+        and not (
+            "sailing_to" not in source
+            and source["last_known_harbor"] == local
+            and record is not None
+            and record.get("sailing_to") == local
+            and record["last_known_harbor"] == source["harbor"]
+        )
+    ):
+        fail("inactive cache is not an authoritative source for this destination")
+
+
+def activate_payload(anchor, record):
+    check_payload(anchor, record)
+    for name in ("TMUX_TMPDIR", "XDG_CACHE_HOME"):
+        Path(record["options"][name]).mkdir(parents=True, exist_ok=True, mode=0o700)
+    record = {**record, "anchored": True, "last_known_harbor": record["harbor"]}
+    record.pop("sailing_to")
+    write_record(anchor, record)
+    return record
+
+
+def rsync_payload(anchor, record, source, destination):
+    vessel = anchor / ".firstmate"
+    exclusions = [str(Path(record["options"]["TMUX_TMPDIR"]).relative_to(vessel)) + "/"]
+    state = Path(record["options"]["FM_STATE_OVERRIDE"]).relative_to(vessel)
+    exclusions.extend(
+        str(state / name) for name in (".lock", ".lock-session", ".lock-session.prev")
+    )
+    filters = [
+        "--exclude=/" + re.sub(r"([\\*?\[])", r"\\\1", path) for path in exclusions
+    ]
+    vessel.mkdir(mode=0o700, exist_ok=True)
+    subprocess.run(
+        [
+            "rsync",
+            "--archive",
+            "--delete",
+            "--delete-excluded",
+            "--partial",
+            "--no-owner",
+            "--no-group",
+            "--no-devices",
+            "--no-specials",
+            "--protect-args",
+            "-e",
+            shlex.join(["ssh", *SSH_OPTIONS]),
+            *filters,
+            "--",
+            source,
+            destination,
+        ],
+        check=True,
+    )
+
+
 def peer(anchor, operation):
     local = here()
     with anchor_lock(anchor):
@@ -626,6 +740,61 @@ def peer(anchor, operation):
                 "error": error,
             }
         request = json.load(sys.stdin)
+        if operation == "receive":
+            source = validate_record(request["source"], anchor)
+            record = (
+                read_record(anchor) if (anchor / ".firstmate.json").exists() else None
+            )
+            if record != request["expected"]:
+                fail("destination changed before receiving; retry sailing")
+            check_receiver(record, source, local)
+            vessel = anchor / ".firstmate"
+            if (
+                record is None
+                and vessel.exists()
+                and (not vessel.is_dir() or any(vessel.iterdir()))
+            ):
+                fail("refusing to overwrite nonempty unregistered vessel state")
+            if not shutil.which("rsync"):
+                fail("rsync is required on the destination harbor")
+            incoming = {
+                **source,
+                "anchored": False,
+                "harbor": local,
+                "last_known_harbor": source["harbor"],
+                "sailing_to": local,
+                "known_harbors": merge_harbors(
+                    known_harbors(source),
+                    known_harbors(record) if record else [],
+                    [local],
+                ),
+            }
+            vessel.mkdir(mode=0o700, exist_ok=True)
+            write_record(anchor, incoming)
+            return {"here": local, "record": incoming}
+        if operation == "activate":
+            source = validate_record(request["source"], anchor)
+            expected = validate_record(request["expected"], anchor)
+            if (
+                source["anchored"]
+                or "sailing_to" in source
+                or source["last_known_harbor"] != local
+                or source["harbor"] != expected["last_known_harbor"]
+                or source.get("vessel_id") != expected.get("vessel_id")
+                or source["options"] != expected["options"]
+                or expected.get("sailing_to") != local
+            ):
+                fail("source did not acknowledge this arrival")
+            record = read_record(anchor)
+            completed = {**expected, "anchored": True, "last_known_harbor": local}
+            completed.pop("sailing_to")
+            if record == completed:
+                check_payload(anchor, record)
+            elif record == expected and record["harbor"] == local:
+                record = activate_payload(anchor, record)
+            else:
+                fail("destination changed before activation; retry sailing")
+            return {"here": local, "record": record}
         destination = harbor_name(request["destination"])
         record = read_record(anchor)
         if (
@@ -635,37 +804,13 @@ def peer(anchor, operation):
         ):
             fail("source changed; rediscover before sailing")
         if operation == "prepare":
-            if not shutil.which("rsync"):
-                fail("rsync is required on the source harbor")
-            retry = not record["anchored"] and (
-                record.get("sailing_to") == destination
-                or (
-                    "sailing_to" not in record
-                    and record.get("last_known_harbor") == destination
-                )
-            )
-            if not record["anchored"] and not retry:
-                fail("vessel is not available for this destination")
-            check_payload(anchor, record)
-            record = with_routing(record)
-            record.update(
-                anchored=False,
-                sailing_to=destination,
-                known_harbors=merge_harbors(
-                    known_harbors(record), request["known_harbors"], [destination]
-                ),
-            )
-            write_record(anchor, record)
-            return {"here": local, "record": record, **stop_vessel(anchor, record)}
-        elif operation == "commit":
-            if record["anchored"] or record.get("sailing_to") != destination:
-                fail("source is not sailing to this destination")
-            record.pop("sailing_to")
-            record["last_known_harbor"] = destination
-        else:
-            fail("unknown peer operation")
-        write_record(anchor, record)
-        return {"here": local, "record": record}
+            return {
+                "here": local,
+                **prepare_source(anchor, record, destination, request["known_harbors"]),
+            }
+        if operation == "commit":
+            return {"here": local, "record": commit_source(anchor, record, destination)}
+        fail("unknown peer operation")
 
 
 def locate(anchor, local, record, source):
@@ -822,40 +967,8 @@ def sail(anchor, source, expected):
             "last_known_harbor": prepared["harbor"],
         }
         write_record(anchor, incoming)
-        exclusions = [
-            str(Path(prepared["options"]["TMUX_TMPDIR"]).relative_to(vessel)) + "/"
-        ]
-        state = Path(prepared["options"]["FM_STATE_OVERRIDE"]).relative_to(vessel)
-        exclusions.extend(
-            str(state / name)
-            for name in (".lock", ".lock-session", ".lock-session.prev")
-        )
-        filters = [
-            "--exclude=/" + re.sub(r"([\\*?\[])", r"\\\1", path) for path in exclusions
-        ]
         try:
-            vessel.mkdir(mode=0o700, exist_ok=True)
-            subprocess.run(
-                [
-                    "rsync",
-                    "--archive",
-                    "--delete",
-                    "--delete-excluded",
-                    "--partial",
-                    "--no-owner",
-                    "--no-group",
-                    "--no-devices",
-                    "--no-specials",
-                    "--protect-args",
-                    "-e",
-                    shlex.join(["ssh", *SSH_OPTIONS]),
-                    *filters,
-                    "--",
-                    f"{host}:{vessel}/",
-                    str(vessel) + "/",
-                ],
-                check=True,
-            )
+            rsync_payload(anchor, prepared, f"{host}:{vessel}/", str(vessel) + "/")
             check_payload(anchor, prepared)
             committed = remote(
                 anchor, host, "commit", {"expected": prepared, "destination": local}
@@ -864,13 +977,7 @@ def sail(anchor, source, expected):
             expected_commit.pop("sailing_to")
             if committed != expected_commit:
                 fail("origin did not acknowledge arrival")
-            for name in ("TMUX_TMPDIR", "XDG_CACHE_HOME"):
-                Path(incoming["options"][name]).mkdir(
-                    parents=True, exist_ok=True, mode=0o700
-                )
-            incoming.pop("sailing_to")
-            incoming.update(anchored=True, last_known_harbor=local)
-            write_record(anchor, incoming)
+            incoming = activate_payload(anchor, incoming)
         except (
             OSError,
             ValueError,
@@ -886,6 +993,104 @@ def sail(anchor, source, expected):
         return incoming
 
 
+def push(anchor, target, expected):
+    local = here()
+    host = harbor_name(target)
+    if host == local:
+        fail("destination is this harbor")
+    with anchor_lock(anchor):
+        record = read_record(anchor)
+        configuration = {**base_record(record), "anchored": True}
+        if configuration != expected:
+            fail("this vessel does not belong to this harbor with these options")
+        pid = session_pid(record)
+        if pid.isdigit() and int(pid) in ancestors(os.getpid()):
+            fail(
+                "push from a separate terminal; stopping this Pi would interrupt its own transfer"
+            )
+        if not shutil.which("ssh") or not shutil.which("rsync"):
+            fail("SSH and rsync are required for sailing")
+        reply = remote(anchor, host, "inspect")
+        destination = reply["here"]
+        if destination == local:
+            fail("destination is this harbor, including through an SSH alias")
+        candidate = reply["record"]
+        record = with_routing(record)
+        if candidate is not None and candidate["anchored"]:
+            if (
+                not record["anchored"]
+                and "sailing_to" not in record
+                and record["last_known_harbor"] == destination
+                and candidate["harbor"] == destination
+                and candidate.get("vessel_id") == record["vessel_id"]
+                and candidate["options"] == record["options"]
+                and reply.get("available") is True
+            ):
+                return candidate
+            fail("destination is already anchored; no source work was stopped")
+        check_receiver(candidate, record, destination)
+        known = merge_harbors(
+            known_harbors(record),
+            known_harbors(candidate) if candidate else [],
+            [host, destination],
+        )
+        record["known_harbors"] = known
+        write_record(anchor, record)
+        incoming = remote(
+            anchor, host, "receive", {"expected": candidate, "source": record}
+        )["record"]
+        expected_incoming = {
+            **record,
+            "anchored": False,
+            "harbor": destination,
+            "last_known_harbor": local,
+            "sailing_to": destination,
+        }
+        if incoming != expected_incoming:
+            fail("destination did not reserve this arrival; no source work was stopped")
+        deadline = time.monotonic() + 60
+        while True:
+            stopped = prepare_source(anchor, record, destination, known)
+            record = stopped["record"]
+            if stopped["stopped"]:
+                break
+            reason = json.dumps(
+                {"remaining": stopped["remaining"], "errors": stopped["errors"]}
+            )
+            if not stopped["requested"] or time.monotonic() >= deadline:
+                fail(
+                    f"source work has not stopped; no data copied; retry pushing after resolving: {reason}"
+                )
+            print(
+                f"fm-anchor: waiting for local source cleanup: {reason}",
+                file=sys.stderr,
+            )
+            time.sleep(2)
+        print(f"fm-anchor: pushing the stopped vessel to {host}", file=sys.stderr)
+        vessel = anchor / ".firstmate"
+        rsync_payload(anchor, record, str(vessel) + "/", f"{host}:{vessel}/")
+        copied = remote(anchor, host, "inspect")
+        if (
+            copied["here"] != destination
+            or copied["record"] != incoming
+            or copied.get("available") is not True
+        ):
+            fail(
+                f"destination did not verify the copied payload: {copied.get('error')}"
+            )
+        committed = commit_source(anchor, record, destination)
+        arrived = remote(
+            anchor, host, "activate", {"expected": incoming, "source": committed}
+        )["record"]
+        completed = {**incoming, "anchored": True, "last_known_harbor": destination}
+        completed.pop("sailing_to")
+        if arrived != completed:
+            fail(
+                "destination did not acknowledge activation; retry pushing to this harbor"
+            )
+        return arrived
+
+
 def main():
     if sys.platform != "linux":
         fail("vessels currently require Linux")
@@ -895,8 +1100,12 @@ def main():
         choices=("init", "check", "sail", "stop", "status", "_peer", "_projects"),
     )
     parser.add_argument("--anchor", required=True)
-    parser.add_argument("--from", dest="source")
-    parser.add_argument("--op", choices=("inspect", "prepare", "commit"))
+    direction = parser.add_mutually_exclusive_group()
+    direction.add_argument("--from", dest="source")
+    direction.add_argument("--to", dest="target")
+    parser.add_argument(
+        "--op", choices=("inspect", "prepare", "commit", "receive", "activate")
+    )
     args = parser.parse_args()
     anchor = anchor_path(args.anchor)
     if args.operation in ("stop", "status"):
@@ -920,8 +1129,11 @@ def main():
                     sys.exit(1)
         return
     if args.operation == "sail":
-        record = sail(
-            anchor, args.source, validate_record(json.load(sys.stdin), anchor)
+        expected = validate_record(json.load(sys.stdin), anchor)
+        record = (
+            push(anchor, args.target, expected)
+            if args.target
+            else sail(anchor, args.source, expected)
         )
     elif args.operation == "_peer":
         print(json.dumps(peer(anchor, args.op)))

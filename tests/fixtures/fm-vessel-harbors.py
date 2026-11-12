@@ -29,10 +29,26 @@ elif operation == "ssh":
     with (world / "calls").open("a") as log:
         log.write(host + "\n")
     host = "desktop" if host == "work" else host
+    if (world / (host + ".no-inbound")).exists():
+        sys.exit(255)
+    with (world / "ssh-operations").open("a") as log:
+        log.write(
+            json.dumps(
+                {
+                    "from": os.environ["FM_FIXTURE_HARBOR"],
+                    "to": host,
+                    "operation": peer_operation,
+                }
+            )
+            + "\n"
+        )
     slot = world / "hosts" / host / "anchor"
     if not slot.is_dir():
         sys.exit(255)
-    if (world / (host + ".fail-commit")).exists() and peer_operation == "commit":
+    if (
+        peer_operation in ("commit", "receive", "activate")
+        and (world / (host + ".fail-" + peer_operation)).exists()
+    ):
         sys.exit(255)
     if (world / (host + ".change-source")).exists() and peer_operation == "prepare":
         path = slot / ".firstmate.json"
@@ -57,7 +73,10 @@ elif operation == "ssh":
     finally:
         anchor.rename(slot)
         current.rename(anchor)
-    if (world / (host + ".fail-commit-after")).exists() and peer_operation == "commit":
+    if (
+        peer_operation in ("commit", "receive", "activate")
+        and (world / (host + ".fail-" + peer_operation + "-after")).exists()
+    ):
         sys.exit(255)
     sys.exit(result.returncode)
 elif operation in ("control", "watch", "daemon", "tmux"):
@@ -95,13 +114,15 @@ elif operation in ("control", "watch", "daemon", "tmux"):
     else:
         assert args == ["--stop"]
 elif operation == "rsync":
+    with (world / "copies").open("a") as log:
+        log.write(json.dumps({"source": args[-2], "destination": args[-1]}) + "\n")
     if (world / "fail-copy").exists():
         sys.exit(23)
-    source = args[-2]
-    host, remote = source.split(":", 1)
+    index = -2 if args[-1].startswith("/") else -1
+    host, remote = args[index].split(":", 1)
     host = "desktop" if host == "work" else host
     relative = Path(remote).relative_to(anchor)
-    args[-2] = str(world / "hosts" / host / "anchor" / relative) + "/"
+    args[index] = str(world / "hosts" / host / "anchor" / relative) + "/"
     result = subprocess.run([os.environ["FM_REAL_RSYNC"], *args], check=False)
     sys.exit(result.returncode)
 else:

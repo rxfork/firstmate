@@ -277,6 +277,123 @@ vessel_project_failures_block_launch_and_can_retry() (
   pass 'missing origins and clone failures block launch without replacing work and permit retry'
 )
 
+pushing_anchors_the_destination_without_reverse_ssh() (
+  setup_harbors push-offline
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'portable work\n' > "$FM_PROJECTS_OVERRIDE/work"
+  git init -q "$FM_PROJECTS_OVERRIDE/repo"
+  printf 'tracked\n' > "$FM_PROJECTS_OVERRIDE/repo/file"
+  git -C "$FM_PROJECTS_OVERRIDE/repo" add file
+  git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$FM_PROJECTS_OVERRIDE/repo" commit -qm initial
+  git -c core.hooksPath=/dev/null -C "$FM_PROJECTS_OVERRIDE/repo" worktree add -qb push-worker "$TREEHOUSE_ROOT/push-worker"
+  printf 'uncommitted\n' > "$TREEHOUSE_ROOT/push-worker/file"
+  mkdir -p "$FM_HOME/pi/primary"
+  printf 'history\n' > "$FM_HOME/pi/primary/session.jsonl"
+  printf 'old runtime lock\n' > "$FM_STATE_OVERRIDE/.lock"
+  touch "$FM_FIXTURE_WORLD/desktop.no-inbound"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to LAPTOP >/dev/null
+  jq -e '.anchored == false and .last_known_harbor == "laptop" and (has("sailing_to") | not)' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'push left the source anchored or uncommitted'
+  jq -se 'all(.from == "desktop" and .to == "laptop")' "$FM_FIXTURE_WORLD/ssh-operations" >/dev/null || fail 'push attempted reverse SSH'
+  activate_harbor laptop
+  [ "$(< "$FM_PROJECTS_OVERRIDE/work")" = 'portable work' ] && [ "$(< "$FM_HOME/pi/primary/session.jsonl")" = history ] || fail 'push lost working data or history'
+  [ ! -e "$FM_STATE_OVERRIDE/.lock" ] || fail 'push copied the source session lock'
+  [ "$(git -C "$TREEHOUSE_ROOT/push-worker" status --porcelain)" = ' M file' ] && [ "$(< "$TREEHOUSE_ROOT/push-worker/file")" = uncommitted ] || fail 'push lost linked Git storage or uncommitted work'
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'pushed destination cannot launch with source offline'
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null || fail 'local launch tried to contact the offline source'
+  printf 'delete me\n' > "$FM_PROJECTS_OVERRIDE/obsolete"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to third >/dev/null
+  activate_harbor third
+  rm "$FM_PROJECTS_OVERRIDE/obsolete"
+  printf 'updated work\n' > "$FM_PROJECTS_OVERRIDE/work"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null
+  activate_harbor laptop
+  [ ! -e "$FM_PROJECTS_OVERRIDE/obsolete" ] && [ "$(< "$FM_PROJECTS_OVERRIDE/work")" = 'updated work' ] || fail 'push did not mirror into an inactive cache'
+  pass 'outbound-only pushing anchors the destination before the source goes offline and mirrors returning caches'
+)
+
+pushing_retries_copy_and_activation_failures() (
+  setup_harbors push-retries
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'keep\n' > "$FM_PROJECTS_OVERRIDE/work"
+  touch "$FM_FIXTURE_WORLD/laptop.fail-receive-after"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'lost receive acknowledgement was ignored'; fi
+  jq -e '.anchored' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'source stopped before receiver acknowledgement'
+  rm "$FM_FIXTURE_WORLD/laptop.fail-receive-after"
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'failed outbound copy activated a destination'; fi
+  jq -e '.anchored == false and .sailing_to == "laptop"' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'failed push did not retain its source reservation'
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  touch "$FM_FIXTURE_WORLD/laptop.fail-activate"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'failed receiver activation was ignored'; fi
+  jq -e '.anchored == false and .last_known_harbor == "laptop" and (has("sailing_to") | not)' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'source did not commit before activating its destination'
+  jq -e '.anchored == false and .sailing_to == "laptop"' "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json" >/dev/null || fail 'failed activation enabled the receiver'
+  rm "$FM_FIXTURE_WORLD/laptop.fail-activate"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null || fail 'pending pushed arrival could not retry'
+  pass 'receive acknowledgement, copy and activation failures keep work intact and permit retry to the same destination'
+)
+
+pushing_lost_activation_ack_never_overwrites_active_work() (
+  setup_harbors push-lost-ack
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'original\n' > "$FM_PROJECTS_OVERRIDE/work"
+  touch "$FM_FIXTURE_WORLD/laptop.fail-activate-after"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'lost activation acknowledgement was reported as received'; fi
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null || fail 'ack-loss fixture did not activate the receiver'
+  printf 'new destination work\n' > "$FM_PROJECTS_OVERRIDE/work"
+  activate_harbor desktop
+  rm "$FM_FIXTURE_WORLD/laptop.fail-activate-after"
+  local before
+  before=$(wc -l < "$FM_FIXTURE_WORLD/copies")
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null || fail 'completed push was not recognized on retry'
+  [ "$(wc -l < "$FM_FIXTURE_WORLD/copies")" = "$before" ] || fail 'retry overwrote the active destination with stale source cache'
+  [ "$(< "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/projects/work")" = 'new destination work' ] || fail 'ack retry lost authoritative work'
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to third >/dev/null 2>&1; then fail 'inactive cache was exported to an unrelated destination'; fi
+  pass 'lost push acknowledgement is recovered without recopying over active work or exporting inactive caches elsewhere'
+)
+
+pushing_rejects_conflicts_and_its_own_primary() (
+  setup_harbors push-refusals
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  activate_harbor desktop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'push replaced a foreign anchored vessel'; fi
+  jq -e '.anchored' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'conflicting destination stopped the source'
+  jq '.anchored = false' "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json" > "$FM_FIXTURE_WORLD/cache"
+  mv "$FM_FIXTURE_WORLD/cache" "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'push adopted a foreign inactive cache'; fi
+  mkdir -p "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate"
+  printf 'keep\n' > "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate/unregistered"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to third >/dev/null 2>&1; then fail 'push overwrote unregistered destination data'; fi
+  [ "$(< "$FM_FIXTURE_WORLD/hosts/third/anchor/.firstmate/unregistered")" = keep ] || fail 'receiver refusal changed unregistered data'
+  jq -e '.anchored' "$FM_ANCHOR/.firstmate.json" >/dev/null || fail 'receiver preflight stopped the source'
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to desktop >/dev/null 2>&1; then fail 'push sailed to its own harbor'; fi
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from laptop --to third >/dev/null 2>&1; then fail 'ambiguous sailing direction was accepted'; fi
+  printf '%s\n' "$$" > "$FM_STATE_OVERRIDE/.lock"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to third >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'push could shut down its calling primary'; fi
+  rg -q 'separate terminal' "$FM_FIXTURE_WORLD/error" || fail 'source-primary restriction was not explained'
+  [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'refused push copied data'
+  pass 'push refuses occupied destinations, ambiguous flags and execution inside its source primary before copying'
+)
+
+pushing_unknown_work_refuses_without_killing_it() (
+  setup_harbors push-unknown
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  (cd "$FM_PROJECTS_OVERRIDE"; exec sleep 120) &
+  local writer=$!
+  trap 'kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'push copied unknown live source work'; fi
+  kill -0 "$writer" || fail 'push killed an unfamiliar process'
+  [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'push copied before stopping source work'
+  jq -e '.anchored == false' "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate.json" >/dev/null || fail 'push launched a receiver before cleanup'
+  kill "$writer"
+  wait "$writer" 2>/dev/null || true
+  trap - EXIT
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null || fail 'push could not resume after cleanup'
+  pass 'push uses the existing source-stop refusal and resumes without killing unknown work'
+)
+
 setup_harbors() {
   export FM_FIXTURE_WORLD="$TMP_ROOT/$1" FM_FIXTURE_HARBOR=''
   export FM_REAL_RSYNC
@@ -538,4 +655,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
