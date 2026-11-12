@@ -303,6 +303,24 @@ def provision_projects(anchor, record):
         )
         if not is_repo:
             continue
+        if (source / ".git").is_file():
+            git_dirs = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-dir",
+                    "--git-common-dir",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.splitlines()
+            if Path(git_dirs[0]).resolve() != Path(git_dirs[1]).resolve():
+                print(f"fm-anchor: skipping linked worktree {source}", file=sys.stderr)
+                continue
         relative = source.relative_to(anchor) if source != anchor else Path(anchor.name)
         destination = projects / relative
         if destination.is_symlink() or not destination.resolve().is_relative_to(

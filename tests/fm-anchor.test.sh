@@ -236,7 +236,10 @@ vessel_projects_clone_origins_only_when_missing() (
   git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$origin" commit -qm initial
   git clone -q "$origin" "$anchor/team/repo"
   git clone -q "$origin" "$anchor/other/repo"
+  git clone -q --separate-git-dir "$TMP_ROOT/separate-git" "$origin" "$anchor/separate"
   git clone -q "$origin" "$anchor/team/repo/nested"
+  git -c core.hooksPath=/dev/null -C "$anchor/team/repo" worktree add -q --detach "$anchor/.treehouse/.treehouse/repo/1/repo" main
+  git -c core.hooksPath=/dev/null -C "$anchor/team/repo" worktree add -q --detach "$anchor/linked-project" main
   ln -s "$anchor/other" "$anchor/linked"
   git -C "$anchor/team/repo" branch other
   mv "$anchor/team/repo/.git/objects" "$TMP_ROOT/borrowed-objects"
@@ -249,7 +252,8 @@ vessel_projects_clone_origins_only_when_missing() (
   printf 'host-only changes\n' > "$anchor/team/repo/file"
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
-  for project in team/repo other/repo; do
+  [ ! -e "$FM_PROJECTS_OVERRIDE/.treehouse" ] && [ ! -e "$FM_PROJECTS_OVERRIDE/linked-project" ] || fail 'discovery cloned linked worktrees as additional projects'
+  for project in team/repo other/repo separate; do
     expected='from origin'
     [ "$project" != team/repo ] || expected='from local main'
     [ "$(< "$FM_PROJECTS_OVERRIDE/$project/file")" = "$expected" ] || fail 'vessel project did not clone local main'
@@ -271,7 +275,7 @@ vessel_projects_clone_origins_only_when_missing() (
   git clone -q "$origin" "$anchor/new-repo"
   bash "$ANCHOR_CLI" run --anchor "$anchor" -- test -d "$FM_PROJECTS_OVERRIDE/new-repo/.git" || fail 'launch did not provision a newly discovered repo'
   git -c core.hooksPath=/dev/null -C "$FM_PROJECTS_OVERRIDE/team/repo" worktree add -qb worker "$TREEHOUSE_ROOT/worker"
-  rm -rf "$origin" "$anchor/team" "$anchor/other" "$anchor/new-repo" "$TMP_ROOT/borrowed-objects"
+  rm -rf "$origin" "$anchor/team" "$anchor/other" "$anchor/new-repo" "$anchor/separate" "$TMP_ROOT/separate-git" "$TMP_ROOT/borrowed-objects"
   [ "$(git -C "$TREEHOUSE_ROOT/worker" show HEAD:file)" = 'from local main' ] || fail 'worker still depended on outside Git storage'
   pass 'missing projects clone only local main with hardlinks where possible, separate remotes and no borrowed Git storage'
 )
@@ -794,4 +798,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock

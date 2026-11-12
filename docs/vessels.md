@@ -40,7 +40,7 @@ Every harbor must use the same physical anchor path and selected directory optio
 
 ## Working repositories
 
-`init` and `run` discover repositories under the anchor, skipping `.firstmate`, directory symlinks and repository contents.
+`init` and `run` discover independent repositories under the anchor, skipping `.firstmate`, directory symlinks, linked Git worktrees and repository contents.
 For each missing vessel project they clone the local checkout's `main` branch into the selected projects directory, preserving its anchor-relative path; a repository at the anchor itself uses the anchor's basename.
 The source checkout becomes remote `local`, its original origin URL becomes remote `origin`, and `main` tracks `origin` with a main-only fetch specification.
 Seeding makes no request to origin; the first origin fetch populates its remote-tracking ref.

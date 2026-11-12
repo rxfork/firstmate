@@ -14,6 +14,7 @@ The sailing cases execute real core peer commands through a local SSH fixture an
 They cover last-known fallback, newer hints, SSH aliases, lowercase and deduplicated harbor names, origin redirects, mismatched identities, conflicting holders, changed sources, incremental cache mirroring with deletions, failed sync retry, lost acknowledgement after origin commit, rejection of inactive caches as authoritative sources and version-1 compatibility without rewriting preferences.
 The environment case retains required agent selection, initial No-mistakes configuration, existing preferences and cumulative forwarding through nested execution.
 The project cases clone only local `main`, verify hardlinked object reuse where possible and dissociation of borrowed objects, preserve nested relative paths and existing dirty copies, and stop discovery at repositories and symlinks.
+Discovery excludes linked Git worktrees under both nested Treehouse directories and ordinary directory names, while still provisioning standalone repositories that use a separate Git directory.
 They verify separate local/origin remotes, origin tracking, refusal of missing origin URLs or local main, and successful seeding with origin unavailable.
 The vessel remains usable after the outside checkouts and borrowed object store are deleted.
 `bash bin/fm-test-run.sh tests/fm-spawn-worktree-settle.test.sh` also passed seven cases, including refusal of outside projects and outside worker Git storage and successful dispatch from a vessel clone.
