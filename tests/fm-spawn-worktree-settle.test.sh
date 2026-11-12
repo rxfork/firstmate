@@ -253,6 +253,49 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+test_vessel_workers_use_vessel_repositories() {
+  local rec id out status
+  local FM_ANCHOR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
+  id=vessel-project-z6
+  rec=$(make_settle_case vessel-project "$id" 0)
+  read_settle_record "$rec"
+  export FM_ANCHOR="$TMP_ROOT/vessel-project"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "a vessel worker accepted an outside project"
+  assert_contains "$out" 'vessel projects' 'outside project refusal did not name vessel projects'
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'outside project created a task record'
+  git clone --quiet --no-local "$PROJ_DIR" "$HOME_DIR/projects/repo"
+  PROJ_DIR="$HOME_DIR/projects/repo"
+  WT_DIR="$HOME_DIR/worktrees/task"
+  git -C "$PROJ_DIR" worktree add --quiet -b task "$WT_DIR"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "vessel project could not spawn"$'\n'"$out"
+  assert_grep "project=$PROJ_DIR" "$HOME_DIR/state/$id.meta" 'worker did not use its vessel clone'
+  pass 'vessel workers refuse outside projects and launch from vessel clones'
+}
+
+test_vessel_worktrees_must_travel_with_the_vessel() {
+  local rec id out status
+  local FM_ANCHOR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
+  id=vessel-worktree-z7
+  rec=$(make_settle_case vessel-worktree "$id" 0)
+  read_settle_record "$rec"
+  export FM_ANCHOR="$TMP_ROOT/vessel-worktree"
+  git clone --quiet --no-local "$PROJ_DIR" "$HOME_DIR/projects/repo"
+  PROJ_DIR="$HOME_DIR/projects/repo"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'worker used a worktree outside the vessel'
+  assert_contains "$out" 'outside the vessel' 'outside worktree refusal was not explained'
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'outside worktree created a task record'
+  pass 'a vessel worker cannot use a worktree or Git storage outside the vessel'
+}
+
+test_vessel_workers_use_vessel_repositories || exit 1
+test_vessel_worktrees_must_travel_with_the_vessel || exit 1
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted

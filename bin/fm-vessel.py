@@ -245,6 +245,62 @@ def check_payload(anchor, record, payload=None):
         fail("vessel backend configuration changed")
 
 
+def provision_projects(anchor, record):
+    projects = Path(record["options"]["FM_PROJECTS_OVERRIDE"])
+    for directory, directories, _files in os.walk(
+        anchor, onerror=lambda error: fail(str(error))
+    ):
+        source = Path(directory)
+        is_repo = (source / ".git").exists()
+        directories[:] = (
+            []
+            if is_repo
+            else [
+                name
+                for name in directories
+                if name != ".firstmate" and not (source / name).is_symlink()
+            ]
+        )
+        if not is_repo:
+            continue
+        relative = source.relative_to(anchor) if source != anchor else Path(anchor.name)
+        destination = projects / relative
+        if destination.is_symlink() or not destination.resolve().is_relative_to(
+            projects
+        ):
+            fail(f"project destination leaves the vessel: {destination}")
+        if destination.exists():
+            if (
+                not (destination / ".git").is_dir()
+                or (destination / ".git").is_symlink()
+            ):
+                fail(f"existing project is not an independent clone: {destination}")
+            continue
+        origin = subprocess.run(
+            ["git", "-C", str(source), "remote", "get-url", "origin"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if origin.returncode or not origin.stdout.strip():
+            fail(f"{source}: cannot read origin: {origin.stderr.strip()}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        print(f"fm-anchor: cloning {relative} into the vessel", file=sys.stderr)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--no-local",
+                "--",
+                origin.stdout.strip(),
+                str(destination),
+            ],
+            cwd=source,
+            stdout=sys.stderr,
+            check=True,
+        )
+
+
 def remote(anchor, host, operation, request=None):
     host = harbor_name(host)
     script = 'exec "${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/bin/fm-anchor.sh" _peer --anchor "$1" --op "$2"'
@@ -526,7 +582,9 @@ def main():
     if sys.platform != "linux":
         fail("vessels currently require Linux")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("init", "check", "sail", "_peer"))
+    parser.add_argument(
+        "operation", choices=("init", "check", "sail", "_peer", "_projects")
+    )
     parser.add_argument("--anchor", required=True)
     parser.add_argument("--from", dest="source")
     parser.add_argument("--op", choices=("inspect", "prepare", "commit"))
@@ -550,6 +608,8 @@ def main():
                 fail(
                     "vessel is not anchored here with these options; metadata was not changed"
                 )
+            if args.operation == "_projects":
+                provision_projects(anchor, record)
     print(json.dumps(record))
 
 

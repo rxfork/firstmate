@@ -139,6 +139,56 @@ core_environment_composes_forwarding_layers() (
   pass 'core exports portable defaults and appends forwarding names without losing caller additions'
 )
 
+vessel_projects_clone_origins_only_when_missing() (
+  local anchor="$TMP_ROOT/discovered projects" origin="$TMP_ROOT/project-origin" project
+  mkdir -p "$anchor/team" "$anchor/other"
+  git init -qb main "$origin"
+  printf 'from origin\n' > "$origin/file"
+  git -C "$origin" add file
+  git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$origin" commit -qm initial
+  git clone -q "$origin" "$anchor/team/repo"
+  git clone -q "$origin" "$anchor/other/repo"
+  git clone -q "$origin" "$anchor/team/repo/nested"
+  ln -s "$anchor/other" "$anchor/linked"
+  printf 'host-only changes\n' > "$anchor/team/repo/file"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  for project in team/repo other/repo; do
+    [ "$(< "$FM_PROJECTS_OVERRIDE/$project/file")" = 'from origin' ] || fail 'vessel project did not clone origin'
+    [ "$(git -C "$FM_PROJECTS_OVERRIDE/$project" rev-parse --path-format=absolute --git-common-dir)" = "$FM_PROJECTS_OVERRIDE/$project/.git" ] || fail 'vessel clone borrowed external Git storage'
+    [ ! -e "$FM_PROJECTS_OVERRIDE/$project/.git/objects/info/alternates" ] || fail 'vessel clone borrowed external objects'
+  done
+  [ ! -e "$FM_PROJECTS_OVERRIDE/team/repo/nested" ] && [ ! -e "$FM_PROJECTS_OVERRIDE/linked" ] || fail 'discovery entered a repository or followed a directory symlink'
+  printf 'travelling changes\n' > "$FM_PROJECTS_OVERRIDE/team/repo/file"
+  git -C "$anchor/team/repo" remote remove origin
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  [ "$(< "$FM_PROJECTS_OVERRIDE/team/repo/file")" = 'travelling changes' ] || fail 'initialization overwrote an existing vessel clone'
+  git clone -q "$origin" "$anchor/new-repo"
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- test -d "$FM_PROJECTS_OVERRIDE/new-repo/.git" || fail 'launch did not provision a newly discovered repo'
+  git -c core.hooksPath=/dev/null -C "$FM_PROJECTS_OVERRIDE/team/repo" worktree add -qb worker "$TREEHOUSE_ROOT/worker"
+  rm -rf "$origin" "$anchor/team" "$anchor/other" "$anchor/new-repo"
+  [ "$(git -C "$TREEHOUSE_ROOT/worker" show HEAD:file)" = 'from origin' ] || fail 'worker still depended on outside Git storage'
+  pass 'discovery clones origins into relative vessel paths only when missing and workers use independent Git storage'
+)
+
+vessel_project_failures_block_launch_and_can_retry() (
+  local anchor="$TMP_ROOT/missing origin" origin="$TMP_ROOT/retry-origin"
+  mkdir -p "$anchor"
+  git init -qb main "$anchor/repo"
+  configure "$anchor"
+  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/no-origin" 2>&1; then fail 'a missing origin was ignored'; fi
+  rg -q 'origin' "$TMP_ROOT/no-origin" || fail 'missing origin was not explained'
+  if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/missing-origin-launched" >/dev/null 2>&1; then fail 'provisioning failure started Pi'; fi
+  [ ! -e "$TMP_ROOT/missing-origin-launched" ] || fail 'failed provisioning executed the launch command'
+  git -C "$anchor/repo" remote add origin "$origin"
+  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'failed clone was ignored'; fi
+  [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'failed clone was left as an existing destination'
+  git init -q --bare "$origin"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  [ -d "$FM_PROJECTS_OVERRIDE/repo/.git" ] || fail 'failed provisioning could not be retried'
+  pass 'missing origins and clone failures block launch without replacing work and permit retry'
+)
+
 setup_harbors() {
   export FM_FIXTURE_WORLD="$TMP_ROOT/$1" FM_FIXTURE_HARBOR=''
   export FM_REAL_RSYNC
@@ -400,4 +450,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run vessel_projects_clone_origins_only_when_missing vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock

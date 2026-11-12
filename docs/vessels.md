@@ -38,6 +38,20 @@ These checks cover selected directory settings, not every possible reference ins
 There is no automatic state collection, path rewriting or backend conversion.
 Every harbor must use the same physical anchor path and selected directory options.
 
+## Working repositories
+
+`init` and `run` discover repositories under the anchor, skipping `.firstmate`, directory symlinks and repository contents.
+For each missing vessel project they clone its origin into the selected projects directory, preserving the source's anchor-relative path; a repository at the anchor itself uses the anchor's basename.
+Clones have independent Git storage, including when the origin is a local repository.
+Existing vessel clones are left untouched, so host repositories cannot overwrite travelling work.
+Missing origins and clone failures stop initialization or launch; fix the origin and retry initialization or launch.
+Only origin's published contents are seeded, not the source checkout's local branches, commits or uncommitted changes.
+No manifests or host provisioning tools are required.
+
+Vessel workers must use projects from the vessel's selected projects directory.
+Their working copies and common Git directories must remain inside the vessel, so Treehouse's Git pointers remain usable after sailing at the same physical path.
+This provisions fresh vessel repositories; it does not move or migrate existing host worktrees.
+
 ## Environment layers
 
 Core supplies portable directory defaults and defaults No-mistakes to descendant daemon mode with `NM_TEST_START_DAEMON=1` (No-mistakes 1.111+).

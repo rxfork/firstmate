@@ -7,6 +7,9 @@
 # Sailing uses SSH/rsync at identical physical paths and requires manually
 # stopped source work. Host tooling/auth remain local. Routing and the peer
 # prepare/copy/commit sequence are owned by fm-vessel.py.
+# init/run discover repositories under the anchor, skipping .firstmate and
+# repository contents, and clone their origins into the selected projects path
+# only when missing. Existing vessel clones are never refreshed or replaced.
 # Core supplies the portable environment; callers choose the runtime command.
 # .firstmate.json records this harbor, physical anchor and selected paths.
 # run checks that exact configuration and anchored=true before exec.
@@ -106,6 +109,9 @@ elif [ "$mode" = init ]; then
   record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" init --anchor "$anchor")
 else
   fail 'vessel is not anchored; initialize it explicitly first'
+fi
+if [ "$mode" = init ] || [ "$mode" = run ]; then
+  printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" _projects --anchor "$anchor" >/dev/null
 fi
 if [ "$mode" != run ]; then printf '%s\n' "$record"; exit 0; fi
 exec 9>&-

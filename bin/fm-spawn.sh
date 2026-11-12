@@ -4268,6 +4268,13 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+if [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
+  VESSEL_PROJECTS_REAL=$(cd "$PROJECTS" && pwd -P)
+  case "$(cd "$PROJ_ABS" && pwd -P)" in
+    "$VESSEL_PROJECTS_REAL"/*) ;;
+    *) echo "error: vessel workers must use vessel projects under $PROJECTS, not $PROJ_ABS" >&2; exit 1 ;;
+  esac
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 &&
   ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
@@ -4673,7 +4680,7 @@ real_path_or_raw() { # <path>
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
 spawn_worktree_isolated() { # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  local path=$1 wt_real wt_top_real wt_git_dir proj_common vessel_real wt_common
   SPAWN_WT_TOP=
   SPAWN_WT_REASON=
   wt_real=
@@ -4719,6 +4726,15 @@ spawn_worktree_isolated() { # <path>
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
     return 1
+  fi
+  if [ -n "${FM_ANCHOR:-}" ]; then
+    vessel_real=$(cd "$FM_HOME" && pwd -P) || return 1
+    wt_common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    wt_common=$(cd "$wt_common" && pwd -P) || return 1
+    if ! path_is_ancestor_of "$vessel_real" "$wt_real" || ! path_is_ancestor_of "$vessel_real" "$wt_common"; then
+      SPAWN_WT_REASON="its worktree or Git storage is outside the vessel"
+      return 1
+    fi
   fi
   return 0
 }
