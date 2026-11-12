@@ -25,7 +25,7 @@ if operation == "uname":
         subprocess.run(["/usr/bin/uname", *args], check=True)
 elif operation == "ssh":
     host, command = args[args.index("--") + 1 :]
-    peer_operation = shlex.split(command)[-1]
+    peer_operation, vessel_name = shlex.split(command)[-2:]
     with (world / "calls").open("a") as log:
         log.write(host + "\n")
     host = "desktop" if host == "work" else host
@@ -51,7 +51,7 @@ elif operation == "ssh":
     ):
         sys.exit(255)
     if (world / (host + ".change-source")).exists() and peer_operation == "prepare":
-        path = slot / ".firstmate.json"
+        path = slot / ".firstmate" / (vessel_name + ".json")
         record = json.loads(path.read_text())
         record["known_harbors"].append("unseen")
         path.write_text(json.dumps(record))
@@ -95,7 +95,9 @@ elif operation in ("control", "watch", "daemon", "tmux"):
         assert args == ["fixture-worker", "exit"]
         os.kill(int((world / "worker.pid").read_text()), signal.SIGTERM)
     elif operation == "tmux":
-        assert args[0] == "-S" and args[1].startswith(str(anchor / ".firstmate/tmux"))
+        assert args[0] == "-S" and args[1].startswith(
+            str(Path(os.environ["FM_HOME"]) / "tmux")
+        )
         if args[2] == "list-windows":
             print("firstmate:fixture-worker")
         elif args[2] == "list-panes":

@@ -65,7 +65,7 @@ version = subprocess.check_output(
 ).strip()
 mode = "RPC" if rpc else "interactive"
 print(f"Pi {version}: {mode} source coordination and SIGTERM shutdown")
-sessions = anchor / ".firstmate/pi/primary"
+sessions = anchor / ".firstmate/flagship/pi/primary"
 sessions.mkdir(parents=True)
 history = sessions / "fixture.jsonl"
 stamp = datetime.now().astimezone().isoformat()
@@ -143,7 +143,7 @@ try:
     state = Path(record["options"]["FM_STATE_OVERRIDE"])
     (state / ".lock").write_text(str(process.pid) + "\n")
     writer = subprocess.Popen(
-        ["sleep", "120"], cwd=anchor / ".firstmate/projects", env=environment
+        ["sleep", "120"], cwd=anchor / ".firstmate/flagship/projects", env=environment
     )
     unrelated_environment = {
         key: value for key, value in environment.items() if key not in record["options"]

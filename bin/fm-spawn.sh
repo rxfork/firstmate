@@ -4270,7 +4270,7 @@ else
 fi
 if [ -n "${FM_ANCHOR:-}" ]; then
   [ "$BACKEND" = tmux ] || { echo 'error: vessel workers require the tmux backend' >&2; exit 1; }
-  bash "$SCRIPT_DIR/fm-anchor.sh" check --anchor "$FM_ANCHOR" >/dev/null || {
+  bash "$SCRIPT_DIR/fm-anchor.sh" check --anchor "$FM_ANCHOR" --vessel "${FM_VESSEL:-flagship}" >/dev/null || {
     echo 'error: vessel is not available for new work; a sailing operation may be stopping it' >&2
     exit 1
   }
@@ -7809,6 +7809,9 @@ if [ "$KIND" = secondmate ]; then
 else
   # A ship or scout works for the active home itself.
   LAUNCH="export FM_HOME=$(shell_quote "$FM_HOME"); $LAUNCH"
+  if [ -n "${FM_ANCHOR:-}" ]; then
+    LAUNCH="export FM_ANCHOR=$(shell_quote "$FM_ANCHOR") FM_VESSEL=$(shell_quote "${FM_VESSEL:-flagship}"); $LAUNCH"
+  fi
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in

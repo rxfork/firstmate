@@ -4,10 +4,30 @@ This interface supports Linux anchoring, starting work and stopping source work 
 
 ## Terms used here
 
-- **Vessel**: the portable Firstmate working environment at `<anchor>/.firstmate`, including its operational state and working repositories.
+- **Vessel**: the portable Firstmate working environment at `<anchor>/.firstmate/<name>`, including its operational state and working repositories.
 - **Anchor**: the physical filesystem directory where the vessel resides.
 - **Harbor**: the host where the vessel resides, not a TCP port.
 - **Ship task**: an implementation task assigned to a worker, not the portable environment.
+
+## Named vessels
+
+The default vessel is `flagship`; `--vessel NAME` selects another independent vessel for any operation.
+Names use 1-64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit.
+The anchor contains one `.firstmate/` container, with each payload at `NAME/` and its `NAME.json` record and `NAME.lock` coordination file alongside it.
+Each vessel has its own identity, repositories, conversations, tool state, tmux sockets and one active harbor.
+Other named vessels may remain active at different harbors; sailing, stopping and scuttling affect only the selected vessel.
+There is no shared manifest or anchor-wide operation lock.
+
+```sh
+bash bin/fm-anchor.sh init --anchor /absolute/anchor --vessel red --agent pi
+bash bin/fm-anchor.sh list --anchor /absolute/anchor
+```
+
+`list` prints sorted, locally registered names, including inactive caches, without SSH, initialization or writes.
+New names can be selected without first appearing in that list.
+This is a fresh layout: old unnamed records and locks are refused without moving, adopting or deleting their data.
+Secondmates remain delegated supervisors, not independent vessels; this interface does not relocate their homes or rewrite remote routes.
+Only files within the selected payload are transported.
 
 ## Local setup
 
@@ -24,7 +44,7 @@ bash bin/fm-anchor.sh run --anchor /absolute/anchor -- COMMAND [ARG...]
 ```
 
 Initialization requires `--agent NAME` and a fresh vessel; it never adopts nonempty unregistered state.
-It creates the selected directories, records the backend, writes the selected No-mistakes agent to `$NM_HOME/config.yaml` and writes `.firstmate.json` beside the vessel.
+It creates the selected directories, records the backend, writes the selected No-mistakes agent to `$NM_HOME/config.yaml` and writes `NAME.json` beside the vessel.
 The name must be a No-mistakes-supported agent identifier; syntactically it uses lowercase letters, digits and hyphens, starting with a letter.
 Reinitialization and later launches preserve existing preferences; no agent is guessed or rewritten during startup.
 That small record contains the physical anchor, local harbor, anchored flag, selected directory options and routing hints; it contains no credentials or arbitrary runtime arguments.
@@ -97,7 +117,7 @@ A local, already anchored vessel needs no SSH discovery; launching can still clo
 Existing local-only records remain readable without modification by `check` and `run`; explicit `sail` adds routing identity when necessary.
 
 The anchored harbor is authoritative; a registered unanchored local copy is disposable cache, not independent working state.
-Core incrementally mirrors the source into the same `.firstmate/` directory with rsync `--archive --delete --delete-excluded --partial`, updates the origin and enables the destination only after sync and acknowledgement succeed.
+Core incrementally mirrors the source into the same `.firstmate/NAME/` directory with rsync `--archive --delete --delete-excluded --partial`, updates the origin and enables the destination only after sync and acknowledgement succeed.
 Files removed at the source are deleted from the receiving cache, unchanged files are reused, and interrupted transfers retry against that same cache.
 There is no staging directory or automatic archive of the previous cache.
 Host tools, authentication, tmux sockets and the old primary-session lock are not transported.
@@ -126,7 +146,7 @@ There is no offline queue, reverse SSH requirement, automatic remote installatio
 
 ## Locks and stopping work
 
-The anchor lock serializes core operations; pulling holds the destination lock and pushing holds the source lock through transfer.
+Each vessel's coordination lock serializes its core operations; pulling holds the destination lock and pushing holds the source lock through transfer.
 Source preparation reserves the vessel before stopping work, blocking new ordinary launches and worker dispatch.
 It uses the existing worker exit command, home-scoped watcher stop, validation-daemon stop without force and the vessel's private tmux server.
 An identified local primary Pi receives SIGTERM through a stable kernel process handle; its owned children must finish before copying.
@@ -164,7 +184,7 @@ bash bin/fm-anchor.sh scuttle --anchor /absolute/anchor --confirm
 
 Core stops local work first, waiting and retrying when the existing primary has been asked to finish cleanup.
 It refuses deletion if cleanup still cannot be confirmed; an accepted request is not treated as proof that work stopped.
-It removes only `<anchor>/.firstmate`, `.firstmate.json` and `.firstmate.lock`, not outside repositories, other harbors or saved sibling archives.
+It removes only `<anchor>/.firstmate/NAME`, `NAME.json` and `NAME.lock`, not the `.firstmate/` container, other named vessels, outside repositories, other harbors or saved sibling archives.
 Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
 Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.
 The coordination lock is removed last, and competing operations must reject an old unlinked lock inode.
@@ -173,6 +193,6 @@ There is no trash, backup or force-stop fallback.
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The core cases also exercise portable environment defaults, cumulative forwarding, empty incoming lists, nested execution and simulated multi-harbor sailing.
+The core cases also exercise independent names, read-only listing, sibling locks and live work, name/path validation, portable environment defaults, cumulative forwarding, empty incoming lists, nested execution and simulated multi-harbor sailing.
 The harbor fixtures execute real core peer commands and real local rsync copies without accessing live vessels or SSH servers.
 Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

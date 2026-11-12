@@ -256,14 +256,14 @@ test_unborn_head_project_is_refused_at_once() {
 prepare_vessel_spawn_case() {
   local id=$1
   FM_ANCHOR="$HOME_DIR/vessel"
-  export FM_ANCHOR
+  export FM_ANCHOR FM_VESSEL=red
   mkdir -p "$FM_ANCHOR"
   (
     unset FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
       TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR
-    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$FM_ANCHOR" --vessel red --agent pi >/dev/null
   ) || fail 'could not initialize the fixture vessel'
-  HOME_DIR="$FM_ANCHOR/.firstmate"
+  HOME_DIR="$FM_ANCHOR/.firstmate/red"
   fm_test_spawn_home "$HOME_DIR" codex
   fm_test_spawn_brief "$HOME_DIR" "$id" 'Exercise vessel worker routing.'
 }
@@ -288,8 +288,8 @@ test_vessel_workers_use_vessel_repositories() {
   status=$?
   expect_code 0 "$status" "vessel project could not spawn"$'\n'"$out"
   assert_grep "project=$PROJ_DIR" "$HOME_DIR/state/$id.meta" 'worker did not use its vessel clone'
-  jq '.anchored = false' "$FM_ANCHOR/.firstmate.json" > "$FM_ANCHOR/changed"
-  mv "$FM_ANCHOR/changed" "$FM_ANCHOR/.firstmate.json"
+  jq '.anchored = false' "$FM_ANCHOR/.firstmate/red.json" > "$FM_ANCHOR/changed"
+  mv "$FM_ANCHOR/changed" "$FM_ANCHOR/.firstmate/red.json"
   fm_test_spawn_brief "$HOME_DIR" "$id-reserved" 'Reserved vessels cannot launch work.'
   out=$(run_settle_spawn "$id-reserved")
   status=$?

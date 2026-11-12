@@ -49,7 +49,7 @@ A lost activation acknowledgement is retried by recognizing the already active
 destination, never by overwriting it with the source's inactive cache.
 
 scuttle requires explicit --confirm and a separate terminal, stops local work,
-and removes only .firstmate plus its sibling .firstmate.json and .firstmate.lock.
+and removes only .firstmate/NAME plus its sibling NAME.json and NAME.lock.
 Only directories gain owner permissions; hardlinked files are unlinked without
 changing outside Git objects. Directory symlinks are never followed. The lock
 is removed last, and lock users reject stale descriptors after inode replacement.
@@ -91,6 +91,16 @@ OPTION_NAMES = {
     "XDG_CACHE_HOME",
 }
 SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+# Each CLI process selects one vessel; SSH peers receive the selection explicitly.
+VESSEL_NAME = "flagship"
+
+
+def vessel_path(anchor, suffix="", name=None):
+    return anchor / ".firstmate" / ((name or VESSEL_NAME) + suffix)
+
+
+def valid_name(name):
+    return re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name) is not None
 
 
 def fail(message):
@@ -115,13 +125,22 @@ def anchor_path(value):
     anchor = Path(value).resolve(strict=True)
     if not anchor.is_dir():
         fail("anchor must be an existing directory")
-    for path in (anchor / ".firstmate", anchor / ".firstmate.json"):
+    if any(
+        path.exists() or path.is_symlink()
+        for path in (anchor / ".firstmate.json", anchor / ".firstmate.lock")
+    ):
+        fail("old unnamed vessel layout exists; no automatic migration is performed")
+    for path in (
+        anchor / ".firstmate",
+        vessel_path(anchor),
+        vessel_path(anchor, ".json"),
+    ):
         if path.is_symlink():
             fail("vessel and metadata must not be symlinks")
     return anchor
 
 
-def validate_record(record, anchor):
+def validate_record(record, anchor, vessel_name=None):
     if not isinstance(record, dict):
         fail("invalid vessel record")
     version = record.get("version")
@@ -141,7 +160,7 @@ def validate_record(record, anchor):
         or set(record["options"]) != OPTION_NAMES
     ):
         fail("invalid vessel configuration")
-    vessel = anchor / ".firstmate"
+    vessel = vessel_path(anchor, name=vessel_name)
     for value in record["options"].values():
         if (
             not isinstance(value, str)
@@ -184,12 +203,12 @@ def validate_record(record, anchor):
     return record
 
 
-def read_record(anchor):
-    path = anchor / ".firstmate.json"
+def read_record(anchor, name=None):
+    path = vessel_path(anchor, ".json", name)
     if path.is_symlink() or not path.is_file():
         fail("vessel record must be a regular file")
     with path.open() as stream:
-        return validate_record(json.load(stream), anchor)
+        return validate_record(json.load(stream), anchor, name)
 
 
 def base_record(record):
@@ -213,17 +232,19 @@ def with_routing(record):
 
 def write_record(anchor, record):
     validate_record(record, anchor)
-    if (anchor / ".firstmate.json").is_symlink():
+    if vessel_path(anchor, ".json").is_symlink():
         fail("vessel record must not be a symlink")
-    fd, name = tempfile.mkstemp(prefix=".firstmate.json.", dir=anchor)
+    fd, name = tempfile.mkstemp(
+        prefix=f".{VESSEL_NAME}.json.", dir=vessel_path(anchor).parent
+    )
     try:
         with os.fdopen(fd, "w") as stream:
             json.dump(record, stream, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, anchor / ".firstmate.json")
-        directory = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+        os.replace(name, vessel_path(anchor, ".json"))
+        directory = os.open(vessel_path(anchor).parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
         finally:
@@ -235,7 +256,8 @@ def write_record(anchor, record):
 
 @contextmanager
 def anchor_lock(anchor):
-    path = anchor / ".firstmate.lock"
+    vessel_path(anchor).parent.mkdir(mode=0o700, exist_ok=True)
+    path = vessel_path(anchor, ".lock")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -262,7 +284,7 @@ def merge_harbors(*groups):
 
 
 def check_payload(anchor, record, payload=None):
-    vessel = anchor / ".firstmate"
+    vessel = vessel_path(anchor)
     payload = payload or vessel
     if not payload.is_dir() or payload.is_symlink():
         fail("vessel payload must be a directory")
@@ -408,8 +430,10 @@ def provision_projects(anchor, record):
 
 def remote(anchor, host, operation, request=None):
     host = harbor_name(host)
-    script = 'exec "${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/bin/fm-anchor.sh" _peer --anchor "$1" --op "$2"'
-    command = shlex.join(["sh", "-c", script, "sh", str(anchor), operation])
+    script = 'exec "${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/bin/fm-anchor.sh" _peer --anchor "$1" --vessel "$3" --op "$2"'
+    command = shlex.join(
+        ["sh", "-c", script, "sh", str(anchor), operation, VESSEL_NAME]
+    )
     try:
         result = subprocess.run(
             ["ssh", *SSH_OPTIONS, "--", host, command],
@@ -464,7 +488,7 @@ def session_pid(record):
 
 
 def vessel_processes(anchor, record):
-    vessel = anchor / ".firstmate"
+    vessel = vessel_path(anchor)
     actors = ancestors(os.getpid())
     pid = session_pid(record)
     if pid.isdigit():
@@ -761,7 +785,7 @@ def activate_payload(anchor, record):
 
 
 def rsync_payload(anchor, record, source, destination):
-    vessel = anchor / ".firstmate"
+    vessel = vessel_path(anchor)
     exclusions = [str(Path(record["options"]["TMUX_TMPDIR"]).relative_to(vessel)) + "/"]
     state = Path(record["options"]["FM_STATE_OVERRIDE"]).relative_to(vessel)
     exclusions.extend(
@@ -799,7 +823,7 @@ def peer(anchor, operation):
     with anchor_lock(anchor):
         if operation == "inspect":
             record = (
-                read_record(anchor) if (anchor / ".firstmate.json").exists() else None
+                read_record(anchor) if vessel_path(anchor, ".json").exists() else None
             )
             available = False
             error = None
@@ -819,12 +843,12 @@ def peer(anchor, operation):
         if operation == "receive":
             source = validate_record(request["source"], anchor)
             record = (
-                read_record(anchor) if (anchor / ".firstmate.json").exists() else None
+                read_record(anchor) if vessel_path(anchor, ".json").exists() else None
             )
             if record != request["expected"]:
                 fail("destination changed before receiving; retry sailing")
             check_receiver(record, source, local)
-            vessel = anchor / ".firstmate"
+            vessel = vessel_path(anchor)
             if (
                 record is None
                 and vessel.exists()
@@ -972,8 +996,8 @@ def sail(anchor, source, expected):
     if source:
         source = harbor_name(source)
     with anchor_lock(anchor):
-        record = read_record(anchor) if (anchor / ".firstmate.json").exists() else None
-        vessel = anchor / ".firstmate"
+        record = read_record(anchor) if vessel_path(anchor, ".json").exists() else None
+        vessel = vessel_path(anchor)
         if (
             record is None
             and vessel.exists()
@@ -987,7 +1011,7 @@ def sail(anchor, source, expected):
                 )
             check_payload(anchor, record)
             upgraded = with_routing(record)
-            if upgraded != json.loads((anchor / ".firstmate.json").read_text()):
+            if upgraded != json.loads(vessel_path(anchor, ".json").read_text()):
                 write_record(anchor, upgraded)
             return upgraded
         if record is None and source is None:
@@ -1080,7 +1104,7 @@ def require_separate_terminal(record):
 def scuttle(anchor, expected):
     with anchor_lock(anchor):
         record = (
-            read_record(anchor) if (anchor / ".firstmate.json").exists() else expected
+            read_record(anchor) if vessel_path(anchor, ".json").exists() else expected
         )
         require_separate_terminal(record)
         deadline = time.monotonic() + 60
@@ -1114,7 +1138,7 @@ def scuttle(anchor, expected):
                         finally:
                             os.close(child)
 
-        vessel = anchor / ".firstmate"
+        vessel = vessel_path(anchor)
         if vessel.exists():
             fd = os.open(vessel, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
@@ -1122,9 +1146,9 @@ def scuttle(anchor, expected):
             finally:
                 os.close(fd)
             shutil.rmtree(vessel)
-        (anchor / ".firstmate.json").unlink(missing_ok=True)
+        vessel_path(anchor, ".json").unlink(missing_ok=True)
         # Last mutation under this lock; stale openers must reject its old inode.
-        (anchor / ".firstmate.lock").unlink()
+        vessel_path(anchor, ".lock").unlink()
     return {"scuttled": True}
 
 
@@ -1198,7 +1222,7 @@ def push(anchor, target, expected):
             )
             time.sleep(2)
         print(f"fm-anchor: pushing the stopped vessel to {host}", file=sys.stderr)
-        vessel = anchor / ".firstmate"
+        vessel = vessel_path(anchor)
         rsync_payload(anchor, record, str(vessel) + "/", f"{host}:{vessel}/")
         copied = remote(anchor, host, "inspect")
         if (
@@ -1237,9 +1261,11 @@ def main():
             "scuttle",
             "_peer",
             "_projects",
+            "list",
         ),
     )
     parser.add_argument("--anchor", required=True)
+    parser.add_argument("--vessel", default="flagship")
     parser.add_argument("--confirm", action="store_true")
     direction = parser.add_mutually_exclusive_group()
     direction.add_argument("--from", dest="source")
@@ -1248,9 +1274,26 @@ def main():
         "--op", choices=("inspect", "prepare", "commit", "receive", "activate")
     )
     args = parser.parse_args()
+    global VESSEL_NAME
+    if not valid_name(args.vessel):
+        parser.error(
+            "vessel name must be 1-64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit"
+        )
+    VESSEL_NAME = args.vessel
     if args.operation == "scuttle" and not args.confirm:
         parser.error("scuttle requires --confirm to discard all local vessel work")
     anchor = anchor_path(args.anchor)
+    if args.operation == "list":
+        names = []
+        namespace = anchor / ".firstmate"
+        if namespace.exists():
+            for path in sorted(namespace.glob("*.json")):
+                if valid_name(path.stem):
+                    read_record(anchor, path.stem)
+                    names.append(path.stem)
+        if names:
+            print("\n".join(names))
+        return
     if args.operation == "scuttle":
         print(
             json.dumps(scuttle(anchor, validate_record(json.load(sys.stdin), anchor)))
