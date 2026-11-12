@@ -17,7 +17,9 @@ anchor = world / "anchor with spaces"
 operation, *args = sys.argv[1:]
 if operation == "uname":
     if args == ["-n"]:
-        print(os.environ["FM_FIXTURE_HARBOR"])
+        names = world / "hostnames.json"
+        host = os.environ["FM_FIXTURE_HARBOR"]
+        print(json.loads(names.read_text()).get(host, host) if names.exists() else host)
     else:
         subprocess.run(["/usr/bin/uname", *args], check=True)
 elif operation == "ssh":

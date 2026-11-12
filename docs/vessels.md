@@ -54,7 +54,9 @@ The existing worker launcher copies the selected current values (or clears selec
 ## Sailing
 
 Install matching core, Python 3.9+, SSH and rsync on both harbors.
-Harbors need distinct hostnames, and those returned by `uname -n` must work as noninteractive SSH destinations using ordinary host configuration.
+Harbors need distinct hostnames, and their lowercase forms must work as noninteractive SSH destinations using ordinary host configuration.
+Hostname components are normalized to lowercase and known harbors are deduplicated, including existing mixed-case records; SSH user name case is preserved.
+Read-only checking does not rewrite records; `sail` persists canonical routing names.
 Core is resolved remotely from `${XDG_DATA_HOME:-$HOME/.local/share}/firstmate`, independently of the development copy.
 Stop all source work manually before requesting a transfer; closing Pi alone does not prove workers or background processes have stopped.
 
@@ -71,13 +73,17 @@ Conflicting discovered holders, mismatched identities and failed lookups stop ra
 A local, already anchored vessel needs no network access.
 Existing local-only records remain readable without modification by `check` and `run`; explicit `sail` adds routing identity when necessary.
 
-Core invokes rsync directly into a private staging directory, updates the origin and enables the destination only after copying and the origin's acknowledgement succeed.
+The anchored harbor is authoritative; a registered unanchored local copy is disposable cache, not independent working state.
+Core incrementally mirrors the source into the same `.firstmate/` directory with rsync `--archive --delete --delete-excluded --partial`, updates the origin and enables the destination only after sync and acknowledgement succeed.
+Files removed at the source are deleted from the receiving cache, unchanged files are reused, and interrupted transfers retry against that same cache.
+There is no staging directory or automatic archive of the previous cache.
 Host tools, authentication, tmux sockets and the old primary-session lock are not transported.
 Durable state, repositories, linked Git worktrees, uncommitted changes and primary conversations are copied without rewriting paths or preferences.
 Vessel-local cache is retained because repositories can reference object storage there.
 Other persisted runtime records are left to ordinary Firstmate recovery; transfer does not resume worker processes.
-The origin's payload is retained, and any previous destination payload is renamed to `.firstmate.previous.*` rather than overwritten or deleted.
-Failed copies remain under `.firstmate.sailing.*`; these saved copies are not automatically collected.
+The origin retains its payload only as an unanchored cache; discovery never treats such a cache as an anchored source.
+A matching in-progress handoff can resume at its reserved destination, including recovery after a lost origin acknowledgement.
+The sibling record and lock, other anchor contents and saved copies from earlier versions are outside rsync's deletion scope.
 After interruption, retry `sail` at the destination; copy or origin-acknowledgement failure keeps that destination inactive and never falls through to initialization.
 If every reachable hint is stale, supply a known source explicitly with `--from` rather than guessing or creating a replacement.
 

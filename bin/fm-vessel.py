@@ -7,16 +7,20 @@ Host tools/authentication are not copied. Ordinary SSH configuration is used.
 Record owner: version 1 contains the original local anchor configuration;
 version 2 adds a stable vessel_id, last_known_harbor and known_harbors (SSH
 names). harbor still identifies the host owning this particular local record.
-check/run accept version 1 without rewriting; explicit sail upgrades it.
+Host components are lowercase and known_harbors is deduplicated; SSH user name
+case is preserved. check/run normalize in memory without rewriting; explicit
+sail persists canonical names and upgrades version 1.
 
 Peer inspect reads a record and tests payload availability. prepare compares
 that exact record under the anchor lock, marks it inactive and reserves it for
 sailing_to. The receiving record reserves itself with the same field, keeping
-its previous payload unavailable as a source. Only that destination may retry.
+its inactive cache unavailable as a source. Only that destination may retry.
 After rsync, commit compares the
 prepared record, clears sailing_to and updates the origin's last-known hint.
-The destination activates only after that acknowledgement and payload install.
-Interrupted transfers remain inactive and retry at the destination. No receipts,
+Rsync incrementally mirrors into the same receiver directory with deletions;
+inactive local state is disposable cache, not a backup or an anchored source.
+The destination activates only after acknowledgement and a complete sync.
+Interrupted transfers remain inactive and retry against that cache. No receipts,
 leases, global registry or automatic process stopping are involved.
 """
 
@@ -58,11 +62,13 @@ def fail(message):
 
 
 def harbor_name(value):
-    if not isinstance(value, str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.@-]*", value
-    ):
+    if not isinstance(value, str):
         fail("harbor must be an SSH host name or configured alias")
-    return value
+    value = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]*", value):
+        fail("harbor must be an SSH host name or configured alias")
+    user, separator, host = value.rpartition("@")
+    return user + separator + host.lower() if separator else value.lower()
 
 
 def here():
@@ -92,7 +98,7 @@ def validate_record(record, anchor):
         fail("unsupported vessel record")
     if record["anchor"] != str(anchor) or type(record["anchored"]) is not bool:
         fail("anchor path differs; sailing requires identical physical paths")
-    harbor_name(record["harbor"])
+    record["harbor"] = harbor_name(record["harbor"])
     if (
         record["backend"] != "tmux"
         or not isinstance(record["options"], dict)
@@ -120,7 +126,7 @@ def validate_record(record, anchor):
             or str(uuid.UUID(record["vessel_id"])) != record["vessel_id"]
         ):
             fail("invalid vessel identity")
-        harbor_name(record["last_known_harbor"])
+        record["last_known_harbor"] = harbor_name(record["last_known_harbor"])
         known = record["known_harbors"]
         if (
             not isinstance(known, list)
@@ -128,15 +134,15 @@ def validate_record(record, anchor):
             or any(not isinstance(name, str) for name in known)
         ):
             fail("invalid known harbors")
-        for name in known:
-            harbor_name(name)
-        if len(set(known)) != len(known) or not {
+        known = list(dict.fromkeys(harbor_name(name) for name in known))
+        record["known_harbors"] = known
+        if not {
             record["harbor"],
             record["last_known_harbor"],
         }.issubset(known):
             fail("invalid known harbors")
         if "sailing_to" in record:
-            harbor_name(record["sailing_to"])
+            record["sailing_to"] = harbor_name(record["sailing_to"])
             if record["anchored"] or record["sailing_to"] not in known:
                 fail("invalid sailing destination")
     return record
@@ -212,7 +218,7 @@ def known_harbors(record):
 
 
 def merge_harbors(*groups):
-    return list(dict.fromkeys(name for group in groups for name in group))
+    return list(dict.fromkeys(harbor_name(name) for group in groups for name in group))
 
 
 def check_payload(anchor, record, payload=None):
@@ -240,7 +246,7 @@ def check_payload(anchor, record, payload=None):
 
 
 def remote(anchor, host, operation, request=None):
-    harbor_name(host)
+    host = harbor_name(host)
     script = 'exec "${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/bin/fm-anchor.sh" _peer --anchor "$1" --op "$2"'
     command = shlex.join(["sh", "-c", script, "sh", str(anchor), operation])
     result = subprocess.run(
@@ -251,7 +257,7 @@ def remote(anchor, host, operation, request=None):
         check=True,
     )
     reply = json.loads(result.stdout)
-    harbor_name(reply["here"])
+    reply["here"] = harbor_name(reply["here"])
     if reply["record"] is not None:
         validate_record(reply["record"], anchor)
     return reply
@@ -377,10 +383,9 @@ def locate(anchor, local, record, source):
         elif candidate.get("sailing_to") == local or (
             candidate.get("last_known_harbor") == local
             and "sailing_to" not in candidate
-            and (
-                record is None
-                or record.get("last_known_harbor", record["harbor"]) == reply["here"]
-            )
+            and record is not None
+            and record.get("sailing_to") == local
+            and record.get("last_known_harbor", record["harbor"]) == reply["here"]
         ):
             retry.append((host, candidate))
     choices = found or retry
@@ -393,7 +398,7 @@ def locate(anchor, local, record, source):
 def sail(anchor, source, expected):
     local = here()
     if source:
-        harbor_name(source)
+        source = harbor_name(source)
     with anchor_lock(anchor):
         record = read_record(anchor) if (anchor / ".firstmate.json").exists() else None
         vessel = anchor / ".firstmate"
@@ -410,7 +415,7 @@ def sail(anchor, source, expected):
                 )
             check_payload(anchor, record)
             upgraded = with_routing(record)
-            if upgraded != record:
+            if upgraded != json.loads((anchor / ".firstmate.json").read_text()):
                 write_record(anchor, upgraded)
             return upgraded
         if record is None and source is None:
@@ -449,7 +454,6 @@ def sail(anchor, source, expected):
             "last_known_harbor": prepared["harbor"],
         }
         write_record(anchor, incoming)
-        stage = Path(tempfile.mkdtemp(prefix=".firstmate.sailing.", dir=anchor))
         exclusions = [
             str(Path(prepared["options"]["TMUX_TMPDIR"]).relative_to(vessel)) + "/"
         ]
@@ -462,10 +466,14 @@ def sail(anchor, source, expected):
             "--exclude=/" + re.sub(r"([\\*?\[])", r"\\\1", path) for path in exclusions
         ]
         try:
+            vessel.mkdir(mode=0o700, exist_ok=True)
             subprocess.run(
                 [
                     "rsync",
                     "--archive",
+                    "--delete",
+                    "--delete-excluded",
+                    "--partial",
                     "--no-owner",
                     "--no-group",
                     "--no-devices",
@@ -476,11 +484,11 @@ def sail(anchor, source, expected):
                     *filters,
                     "--",
                     f"{host}:{vessel}/",
-                    str(stage) + "/",
+                    str(vessel) + "/",
                 ],
                 check=True,
             )
-            check_payload(anchor, prepared, stage)
+            check_payload(anchor, prepared)
             committed = remote(
                 anchor, host, "commit", {"expected": prepared, "destination": local}
             )["record"]
@@ -488,14 +496,6 @@ def sail(anchor, source, expected):
             expected_commit.pop("sailing_to")
             if committed != expected_commit:
                 fail("origin did not acknowledge arrival")
-            if vessel.exists():
-                previous = anchor / (".firstmate.previous." + uuid.uuid4().hex)
-                vessel.rename(previous)
-                print(
-                    f"fm-anchor: previous local copy preserved at {previous}",
-                    file=sys.stderr,
-                )
-            stage.rename(vessel)
             for name in ("TMUX_TMPDIR", "XDG_CACHE_HOME"):
                 Path(incoming["options"][name]).mkdir(
                     parents=True, exist_ok=True, mode=0o700
@@ -510,9 +510,8 @@ def sail(anchor, source, expected):
             TypeError,
             subprocess.CalledProcessError,
         ):
-            saved = stage if stage.exists() else vessel
             print(
-                f"fm-anchor: arrival interrupted; retry here; copied data preserved at {saved}",
+                f"fm-anchor: arrival interrupted; retry here using the inactive cache at {vessel}",
                 file=sys.stderr,
             )
             raise
