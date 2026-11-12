@@ -161,7 +161,8 @@ The personal launcher requires typing `SCUTTLE`; direct core callers must explic
 bash bin/fm-anchor.sh scuttle --anchor /absolute/anchor --confirm
 ```
 
-Core stops local work first and refuses deletion when work remains unconfirmed.
+Core stops local work first, waiting and retrying when the existing primary has been asked to finish cleanup.
+It refuses deletion if cleanup still cannot be confirmed; an accepted request is not treated as proof that work stopped.
 It removes only `<anchor>/.firstmate`, `.firstmate.json` and `.firstmate.lock`, not outside repositories, other harbors or saved sibling archives.
 Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
 Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.

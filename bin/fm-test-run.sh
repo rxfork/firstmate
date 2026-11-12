@@ -812,7 +812,7 @@ tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
 tests/fm-github-https-lib.test.sh 1000
-tests/fm-anchor.test.sh 76569
+tests/fm-anchor.test.sh 80446
 tests/fm-gitignore-config.test.sh 59
 tests/fm-gotmp.test.sh 1509
 tests/fm-grok-continuity-live-e2e.test.sh 46

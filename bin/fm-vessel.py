@@ -1051,9 +1051,20 @@ def scuttle(anchor, expected):
             read_record(anchor) if (anchor / ".firstmate.json").exists() else expected
         )
         require_separate_terminal(record)
-        stopped = stop_vessel(anchor, record)
-        if not stopped["stopped"]:
-            fail(f"work has not stopped; vessel was not deleted: {json.dumps(stopped)}")
+        deadline = time.monotonic() + 60
+        while True:
+            stopped = stop_vessel(anchor, record)
+            if stopped["stopped"]:
+                break
+            if not stopped["requested"] or time.monotonic() >= deadline:
+                fail(
+                    f"work has not stopped; vessel was not deleted: {json.dumps(stopped)}"
+                )
+            print(
+                f"fm-anchor: waiting for requested cleanup before scuttling: {json.dumps(stopped)}",
+                file=sys.stderr,
+            )
+            time.sleep(2)
 
         def writable_directories(fd):
             # Do not chmod files: Git objects may be hardlinked to outside repos.
