@@ -334,6 +334,20 @@ def provision_projects(anchor, record):
             ):
                 fail(f"existing project is not an independent clone: {destination}")
             continue
+        # get-url can return the name 'origin' when its configured URL is empty.
+        configured_origin = subprocess.run(
+            ["git", "-C", str(source), "config", "--get", "remote.origin.url"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if configured_origin.returncode == 1 or (
+            configured_origin.returncode == 0 and not configured_origin.stdout.strip()
+        ):
+            print(f"fm-anchor: skipping {relative}: no origin URL", file=sys.stderr)
+            continue
+        if configured_origin.returncode:
+            fail(f"{source}: cannot read origin: {configured_origin.stderr.strip()}")
         origin = subprocess.run(
             ["git", "-C", str(source), "remote", "get-url", "origin"],
             check=False,

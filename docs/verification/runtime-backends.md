@@ -15,7 +15,7 @@ They cover last-known fallback, newer hints, SSH aliases, lowercase and deduplic
 The environment case retains required agent selection, initial No-mistakes configuration, existing preferences and cumulative forwarding through nested execution.
 The project cases clone only local `main`, verify hardlinked object reuse where possible and dissociation of borrowed objects, preserve nested relative paths and existing dirty copies, and stop discovery at repositories and symlinks.
 Discovery excludes linked Git worktrees under both nested Treehouse directories and ordinary directory names, while still provisioning standalone repositories that use a separate Git directory.
-They verify separate local/origin remotes, origin tracking, refusal of missing origin URLs or local main, and successful seeding with origin unavailable.
+They verify separate local/origin remotes, origin tracking, visible skips for missing or empty origin URLs, refusal of broken Git configuration or missing local main, and successful seeding with origin unavailable.
 The vessel remains usable after the outside checkouts and borrowed object store are deleted.
 `bash bin/fm-test-run.sh tests/fm-spawn-worktree-settle.test.sh` also passed seven cases, including refusal of outside projects and outside worker Git storage and successful dispatch from a vessel clone.
 The source-stop cases exercise real processes and real peer/copy commands, with scoped worker/watch/daemon/tmux interfaces represented by fixtures.

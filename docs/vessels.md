@@ -47,7 +47,8 @@ Seeding makes no request to origin; the first origin fetch populates its remote-
 Normal local cloning reuses immutable Git objects through hardlinks where possible, without borrowing an outside object directory.
 Borrowed source objects are dissociated so the vessel remains usable after outside repositories disappear.
 Existing vessel clones are left untouched, so host repositories cannot overwrite travelling work.
-Missing origin URLs, missing local `main` branches and clone failures stop initialization or launch; fix the source checkout and retry.
+Repositories without an origin URL are skipped with a diagnostic during initialization and launch.
+Other Git errors, missing local `main` branches and clone failures still stop initialization or launch; fix the source checkout and retry.
 Committed local `main` history is seeded, including unpublished commits, but other branches and uncommitted changes are not.
 The `local` remote is optional convenience; ordinary vessel work uses origin, since the outside checkout may not exist on another harbor.
 No manifests or host provisioning tools are required.

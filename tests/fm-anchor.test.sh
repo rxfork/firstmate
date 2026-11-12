@@ -285,20 +285,36 @@ vessel_project_failures_block_launch_and_can_retry() (
   mkdir -p "$anchor"
   git init -qb main "$anchor/repo"
   configure "$anchor"
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/no-origin" 2>&1; then fail 'a missing origin was ignored'; fi
-  rg -q 'origin' "$TMP_ROOT/no-origin" || fail 'missing origin was not explained'
-  if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/missing-origin-launched" >/dev/null 2>&1; then fail 'provisioning failure started Pi'; fi
-  [ ! -e "$TMP_ROOT/missing-origin-launched" ] || fail 'failed provisioning executed the launch command'
-  git -C "$anchor/repo" remote add origin "$origin"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/no-origin" 2>&1 || fail 'a missing origin stopped initialization'
+  rg -q 'skipping repo: no origin' "$TMP_ROOT/no-origin" || fail 'missing origin skip was not explained'
+  [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'an originless repository was cloned'
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/missing-origin-launched" >"$TMP_ROOT/no-origin-run" 2>&1 || fail 'a missing origin stopped launch'
+  rg -q 'skipping repo: no origin' "$TMP_ROOT/no-origin-run" || fail 'launch did not explain the skipped repository'
+  [ -f "$TMP_ROOT/missing-origin-launched" ] || fail 'originless repository prevented the launch command'
+  git init -qb main "$anchor/empty-url"
+  git -C "$anchor/empty-url" config remote.origin.url ''
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/empty-origin" 2>&1 || fail 'an empty origin URL stopped initialization'
+  rg -q 'skipping empty-url: no origin' "$TMP_ROOT/empty-origin" || fail 'empty origin URL skip was not explained'
+  [ ! -e "$FM_PROJECTS_OVERRIDE/empty-url" ] || fail 'a repository with an empty origin URL was cloned'
+  git -C "$anchor/repo" config "url.$origin.insteadOf" 'fixture-origin:'
+  git -C "$anchor/repo" remote add origin 'fixture-origin:'
   if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'failed clone was ignored'; fi
   [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'failed clone was left as an existing destination'
+  if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/failed-clone-launched" >/dev/null 2>&1; then fail 'failed clone permitted launch'; fi
+  [ ! -e "$TMP_ROOT/failed-clone-launched" ] || fail 'failed clone executed the launch command'
   printf 'available locally\n' > "$anchor/repo/file"
   git -C "$anchor/repo" add file
   git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$anchor/repo" commit -qm main
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   [ -d "$FM_PROJECTS_OVERRIDE/repo/.git" ] || fail 'failed provisioning could not be retried'
+  [ "$(git -C "$FM_PROJECTS_OVERRIDE/repo" remote get-url origin)" = "$origin" ] || fail 'source origin URL rewriting was lost'
   [ ! -e "$origin" ] || fail 'fixture unexpectedly made origin available'
-  pass 'missing origins or local main block launch, then retry clones locally without contacting the unavailable origin'
+  git init -qb main "$anchor/broken"
+  printf '[broken\n' >> "$anchor/broken/.git/config"
+  if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/broken-config-launched" >"$TMP_ROOT/broken-origin" 2>&1; then fail 'a broken Git configuration was treated as a missing origin'; fi
+  rg -q 'cannot read origin' "$TMP_ROOT/broken-origin" || fail 'broken Git configuration diagnostics were hidden'
+  [ ! -e "$TMP_ROOT/broken-config-launched" ] || fail 'broken Git configuration permitted launch'
+  pass 'missing and empty origins warn and skip; missing main and broken Git configuration block launch; retry seeds locally without origin access'
 )
 
 pushing_anchors_the_destination_without_reverse_ssh() (
@@ -798,4 +814,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it vessel_project_failures_block_launch_and_can_retry inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
