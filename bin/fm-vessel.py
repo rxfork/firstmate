@@ -249,13 +249,17 @@ def remote(anchor, host, operation, request=None):
     host = harbor_name(host)
     script = 'exec "${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/bin/fm-anchor.sh" _peer --anchor "$1" --op "$2"'
     command = shlex.join(["sh", "-c", script, "sh", str(anchor), operation])
-    result = subprocess.run(
-        ["ssh", *SSH_OPTIONS, "--", host, command],
-        input=json.dumps(request) if request is not None else "",
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ssh", *SSH_OPTIONS, "--", host, command],
+            input=json.dumps(request) if request is not None else "",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() or error.stdout.strip() or "no diagnostic output"
+        fail(f"{host} {operation} failed (exit {error.returncode}): {detail}")
     reply = json.loads(result.stdout)
     reply["here"] = harbor_name(reply["here"])
     if reply["record"] is not None:

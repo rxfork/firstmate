@@ -311,7 +311,9 @@ sailing_refuses_source_changes_before_copy() (
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
   activate_harbor laptop
   touch "$FM_FIXTURE_WORLD/desktop.change-source"
-  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'changed origin was copied'; fi
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/error" 2>&1; then fail 'changed origin was copied'; fi
+  rg -q 'source changed; rediscover before sailing' "$FM_FIXTURE_WORLD/error" || fail 'origin refusal reason was hidden'
+  rg -q 'desktop.*prepare.*exit 1' "$FM_FIXTURE_WORLD/error" || fail 'origin refusal lost its harbor, operation or exit status'
   jq -e '.anchored and (.known_harbors | index("unseen") != null)' "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate.json" >/dev/null || fail 'source-change fixture did not run or source was deactivated'
   [ ! -e "$FM_ANCHOR/.firstmate.json" ] && [ ! -e "$FM_HOME" ] || fail 'changed source created local vessel state'
   pass 'a changed source is rejected before copying or deactivating it'
