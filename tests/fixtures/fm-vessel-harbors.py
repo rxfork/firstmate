@@ -46,7 +46,7 @@ elif operation == "ssh":
     if not slot.is_dir():
         sys.exit(255)
     if (
-        peer_operation in ("commit", "receive", "activate")
+        peer_operation in ("commit", "receive", "activate", "cancel")
         and (world / (host + ".fail-" + peer_operation)).exists()
     ):
         sys.exit(255)
@@ -74,7 +74,7 @@ elif operation == "ssh":
         anchor.rename(slot)
         current.rename(anchor)
     if (
-        peer_operation in ("commit", "receive", "activate")
+        peer_operation in ("commit", "receive", "activate", "cancel")
         and (world / (host + ".fail-" + peer_operation + "-after")).exists()
     ):
         sys.exit(255)
@@ -126,6 +126,9 @@ elif operation == "rsync":
     relative = Path(remote).relative_to(anchor)
     args[index] = str(world / "hosts" / host / "anchor" / relative) + "/"
     result = subprocess.run([os.environ["FM_REAL_RSYNC"], *args], check=False)
+    if result.returncode == 0 and (world / "interrupt-copy").exists():
+        os.kill(os.getppid(), signal.SIGINT)
+        sys.exit(130)
     sys.exit(result.returncode)
 else:
     raise SystemExit("unknown fixture operation")

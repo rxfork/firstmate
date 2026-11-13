@@ -4,13 +4,18 @@
 #        fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]
 #        fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]
-#        fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR]
+#        fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]
 #        fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)
 # open prompts to initialize or sail an unregistered vessel, otherwise follows
 # its recorded harbor, then runs COMMAND through the ordinary run gate.
 # EOF or declined initialization never starts COMMAND. Prompts go to stderr.
+# An interrupted initialization resumes from NAME.init.json before launching.
+# Reopening an unfinished sail prompts to resume, cancel, or quit.
+# sail --cancel revokes an inactive destination before reanchoring the source;
+# a receiving harbor forwards cancellation to its source without holding its lock.
+# Unreachable or already active destinations refuse.
 # scuttle --interactive requires typing SCUTTLE before the ordinary --confirm
 # path; noninteractive callers must still supply --confirm explicitly.
 # Sailing uses SSH/rsync at identical physical paths. Source preparation stops
@@ -18,10 +23,12 @@
 # Host tooling/auth remain local. fm-vessel.py owns routing, stopping and the
 # prepare/copy/commit sequence; status lists the local scoped process facts.
 # init/run discover repositories under the anchor, skipping .firstmate and
-# repository contents, and clone local main into the selected projects path
-# only when missing. local points at the source; origin retains its origin URL.
+# repository contents, and clone local main (or master) into the projects path
+# only when missing. Repositories with neither branch warn and skip.
+# local points at the source; origin retains its origin URL.
 # Existing vessel clones are never refreshed or replaced.
-# Core supplies the portable environment; callers choose the runtime command.
+# Core supplies tool-specific portable paths, never host XDG paths.
+# Callers choose the runtime command.
 # --vessel NAME selects .firstmate/NAME (default flagship); NAME.json records
 # this harbor, physical anchor and selected paths beside that payload.
 # run checks that exact configuration and anchored=true before exec.
@@ -35,7 +42,7 @@
 # deletion, not files that may share hardlinks with outside repositories.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nOpen prompts to initialize or sail before running the supplied command.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]\n       fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nSail --cancel revokes an inactive destination before reopening the source; unavailable or active destinations refuse.\nInterrupted initialization resumes on open or init. Host XDG paths are unchanged.\nOpen prompts to initialize or sail before running the supplied command.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -80,7 +87,9 @@ case "$mode" in
     fi
     ;;
   sail)
-    if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || { [ "${1:-}" != --from ] && [ "${1:-}" != --to ]; } || [ -z "${2:-}" ]; }; then
+    if [ "$#" -eq 1 ] && [ "$1" = --cancel ]; then
+      :
+    elif [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || { [ "${1:-}" != --from ] && [ "${1:-}" != --to ]; } || [ -z "${2:-}" ]; }; then
       usage >&2
       exit 2
     fi
@@ -92,8 +101,9 @@ esac
 namespace="$anchor/.firstmate"
 vessel="$namespace/$vessel_name"
 metadata="$namespace/$vessel_name.json"
+initializing="$namespace/$vessel_name.init.json"
 lock="$namespace/$vessel_name.lock"
-[ ! -L "$namespace" ] && [ ! -L "$vessel" ] && [ ! -L "$metadata" ] || fail 'vessel container, payload and metadata must not be symlinks'
+[ ! -L "$namespace" ] && [ ! -L "$vessel" ] && [ ! -L "$metadata" ] && [ ! -L "$initializing" ] || fail 'vessel container, payload and metadata must not be symlinks'
 if [ "$mode" = list ]; then
   exec python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" list --anchor "$anchor" --vessel "$vessel_name"
 fi
@@ -110,27 +120,27 @@ export TREEHOUSE_ROOT="${TREEHOUSE_ROOT:-$vessel/worktrees}"
 export NM_HOME="${NM_HOME:-$vessel/no-mistakes}"
 export LAVISH_AXI_STATE_DIR="${LAVISH_AXI_STATE_DIR:-$vessel/lavish-axi}"
 export PI_CODING_AGENT_SESSION_DIR="${PI_CODING_AGENT_SESSION_DIR:-$vessel/pi/sessions}"
-export TMUX_TMPDIR="$vessel/tmux" XDG_CACHE_HOME="$vessel/cache"
+export TMUX_TMPDIR="$vessel/tmux"
 export NM_TEST_START_DAEMON="${NM_TEST_START_DAEMON-1}"
-export FM_WORKER_ENV_FORWARD="${FM_WORKER_ENV_FORWARD:+$FM_WORKER_ENV_FORWARD }PATH TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR TMUX_TMPDIR XDG_CACHE_HOME NM_TEST_START_DAEMON"
+export FM_WORKER_ENV_FORWARD="${FM_WORKER_ENV_FORWARD:+$FM_WORKER_ENV_FORWARD }PATH TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR TMUX_TMPDIR NM_TEST_START_DAEMON"
 unset TMUX TMUX_PANE ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
 args=(--arg anchor "$anchor" --arg harbor "$(uname -n)")
-directories=()
 for name in FM_HOME FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
-  TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR TMUX_TMPDIR XDG_CACHE_HOME; do
+  TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR TMUX_TMPDIR; do
   value=${!name:-}
   [ -n "$value" ] && [[ "$value" = /* ]] || fail "$name must name an absolute vessel directory"
   value=$(realpath -m -- "$value")
   case "$value" in "$vessel"|"$vessel"/*) ;; *) fail "$name is outside the vessel" ;; esac
   args+=(--arg "$name" "$value")
-  directories+=("$value")
 done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
 snapshot=$(jq -n "${args[@]}" '{version:2, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
 if [ "$mode" = open ]; then
   target=(--anchor "$anchor" --vessel "$vessel_name")
-  if [ ! -e "$metadata" ]; then
+  if [ -e "$initializing" ]; then
+    bash "${BASH_SOURCE[0]}" init "${target[@]}" --agent "$agent" >/dev/null
+  elif [ ! -e "$metadata" ]; then
     printf 'Sail vessel %s here from another harbor? [y/N] ' "$vessel_name" >&2
     IFS= read -r answer || exit 1
     case "$answer" in
@@ -149,7 +159,41 @@ if [ "$mode" = open ]; then
         ;;
     esac
   else
-    bash "${BASH_SOURCE[0]}" sail "${target[@]}" >/dev/null
+    route=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" _route --anchor "$anchor" --vessel "$vessel_name")
+    destination=$(jq -r '.sailing_to // empty' <<< "$route")
+    if [ -n "$destination" ]; then
+      harbor=$(jq -r '.harbor' <<< "$route")
+      source_harbor=$harbor
+      if [ "$destination" = "$harbor" ]; then
+        source_harbor=$(jq -r '.last_known_harbor' <<< "$route")
+        printf 'Unfinished sail from %s. ' "$source_harbor" >&2
+      else
+        printf 'Unfinished sail to %s. ' "$destination" >&2
+      fi
+      printf '[r]esume sailing, [c]ancel transfer, or [q]uit? [r] ' >&2
+      IFS= read -r answer || exit 1
+      case "$answer" in
+        ''|r|R|resume)
+          if [ "$destination" = "$harbor" ]; then
+            bash "${BASH_SOURCE[0]}" sail "${target[@]}" >/dev/null
+          else
+            bash "${BASH_SOURCE[0]}" sail "${target[@]}" --to "$destination" >/dev/null
+            printf 'Vessel sailed to %s.\n' "$destination" >&2
+            exit 0
+          fi
+          ;;
+        c|C|cancel)
+          bash "${BASH_SOURCE[0]}" sail "${target[@]}" --cancel >/dev/null
+          if [ "$destination" = "$harbor" ]; then
+            printf 'Sailing cancelled; reopen the vessel at %s.\n' "$source_harbor" >&2
+            exit 0
+          fi
+          ;;
+        *) exit 1 ;;
+      esac
+    else
+      bash "${BASH_SOURCE[0]}" sail "${target[@]}" >/dev/null
+    fi
   fi
   exec bash "${BASH_SOURCE[0]}" run "${target[@]}" -- "$@"
 fi
@@ -170,20 +214,13 @@ fi
 exec 9>> "$lock"
 flock -n 9 || fail 'another anchor operation is in progress'
 [ ! -L "$lock" ] && [ "$lock" -ef /proc/self/fd/9 ] || fail 'anchor lock changed; retry the operation'
-if [ -e "$metadata" ]; then
+if [ "$mode" = init ] && { [ ! -e "$metadata" ] || [ -e "$initializing" ]; }; then
+  record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" init --anchor "$anchor" --vessel "$vessel_name" --agent "$agent")
+elif [ -e "$metadata" ]; then
   record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" check --anchor "$anchor" --vessel "$vessel_name") || exit 1
   if [ ! -f "$FM_CONFIG_OVERRIDE/backend" ] || [ "$(< "$FM_CONFIG_OVERRIDE/backend")" != tmux ]; then
     fail 'vessel backend configuration changed'
   fi
-elif [ "$mode" = init ]; then
-  [ ! -e "$vessel" ] || [ -d "$vessel" ] || fail 'vessel must be a directory'
-  shopt -s nullglob dotglob
-  existing=("$vessel"/*)
-  [ "${#existing[@]}" -eq 0 ] || fail 'refusing to adopt nonempty unregistered vessel state'
-  mkdir -p -- "${directories[@]}"
-  printf 'tmux\n' > "$FM_CONFIG_OVERRIDE/backend"
-  printf 'agent: "%s"\n' "$agent" > "$NM_HOME/config.yaml"
-  record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" init --anchor "$anchor" --vessel "$vessel_name")
 else
   fail 'vessel is not anchored; initialize it explicitly first'
 fi

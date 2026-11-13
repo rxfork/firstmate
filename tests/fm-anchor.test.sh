@@ -6,6 +6,7 @@ set -eu
 if [ "$(uname -s)" != Linux ]; then printf 'skip: local anchoring requires Linux\n'; exit 0; fi
 TMP_ROOT=$(fm_test_tmproot fm-anchor)
 ANCHOR_CLI="$ROOT/bin/fm-anchor.sh"
+REAL_RSYNC=$(command -v rsync)
 
 configure() {
   export FM_ANCHOR="$1" FM_VESSEL="${2:-flagship}" FM_HOME="$1/.firstmate/${2:-flagship}" FM_BACKEND=tmux
@@ -13,8 +14,267 @@ configure() {
   export FM_STATE_OVERRIDE="$FM_HOME/state" FM_PROJECTS_OVERRIDE="$FM_HOME/projects"
   export TREEHOUSE_ROOT="$FM_HOME/worktrees" NM_HOME="$FM_HOME/no-mistakes"
   export LAVISH_AXI_STATE_DIR="$FM_HOME/lavish-axi" PI_CODING_AGENT_SESSION_DIR="$FM_HOME/pi/sessions"
-  export TMUX_TMPDIR="$FM_HOME/tmux" XDG_CACHE_HOME="$FM_HOME/cache"
+  export TMUX_TMPDIR="$FM_HOME/tmux" XDG_CACHE_HOME="$TMP_ROOT/host-cache"
 }
+
+host_xdg_paths_are_preserved() (
+  local anchor="$TMP_ROOT/host-xdg" name
+  mkdir -p "$anchor"
+  configure "$anchor"
+  for name in XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR; do
+    export "$name=$TMP_ROOT/host-$name"
+  done
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '
+    for name in XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR; do
+      [ "${!name}" = "$1/host-$name" ] || exit 1
+    done
+  ' bash "$TMP_ROOT" || fail 'launch changed host XDG paths'
+  jq -e '.options | has("XDG_CACHE_HOME") | not' "$anchor/.firstmate/flagship.json" >/dev/null || fail 'host cache was registered as vessel state'
+  unset XDG_CACHE_HOME
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '[ -z "${XDG_CACHE_HOME+x}" ]' || fail 'launch set an absent cache path'
+  pass 'launch preserves host XDG paths, including an unset cache path'
+)
+
+shell_startup_does_not_poison_sailing() (
+  setup_harbors history-startup
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'portable work\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  export BASH_ENV="$TMP_ROOT/history-startup.bash"
+  # shellcheck disable=SC2016
+  printf '%s\n' 'if [ -n "${XDG_CACHE_HOME:-}" ]; then' \
+    '  mkdir -p "$XDG_CACHE_HOME/bash"' \
+    '  touch "$XDG_CACHE_HOME/bash/history"' 'fi' > "$BASH_ENV"
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if printf 'y\ndesktop\n' | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$TMP_ROOT/history-launched" >"$TMP_ROOT/history-error" 2>&1; then fail 'failed transfer launched work'; fi
+  [ -e "$FM_ANCHOR/.firstmate/flagship.json" ] || fail 'shell startup blocked sailing before registration'
+  [ ! -e "$TMP_ROOT/history-launched" ] || fail 'failed transfer executed the launch command'
+  [ -f "$XDG_CACHE_HOME/bash/history" ] && [ ! -e "$FM_HOME/cache/bash/history" ] || fail 'history was redirected into the vessel'
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  printf 'r\n' | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$TMP_ROOT/history-launched" >/dev/null || fail 'interrupted sailing could not retry'
+  [ "$(< "$FM_HOME/projects/work")" = 'portable work' ] && [ -f "$TMP_ROOT/history-launched" ] || fail 'retry lost work or did not launch'
+  pass 'shell startup retains host history and failed sailing can retry without cleanup'
+)
+
+interrupted_copy_can_retry_without_cleanup() (
+  setup_harbors interrupted-copy
+  local rc=0
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'portable work\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/interrupt-copy"
+  bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$TMP_ROOT/interrupted-launched" <<< $'y\ndesktop' >"$TMP_ROOT/interrupted-output" 2>&1 || rc=$?
+  [ "$rc" -eq 130 ] || fail "copy interruption did not return 130: $rc"
+  [ ! -e "$TMP_ROOT/interrupted-launched" ] || fail 'interrupted transfer launched work'
+  jq -e '.anchored == false and .sailing_to == "laptop"' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'interruption lost the retryable arrival'
+  [ "$(< "$FM_HOME/projects/work")" = 'portable work' ] || fail 'interruption fixture did not copy real payload'
+  rm "$FM_FIXTURE_WORLD/interrupt-copy"
+  printf 'r\n' | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$TMP_ROOT/interrupted-launched" >/dev/null || fail 'interrupted copy could not reopen and retry'
+  [ -f "$TMP_ROOT/interrupted-launched" ] || fail 'retry did not launch after arrival'
+  pass 'SIGINT during copying leaves an inactive registered arrival that reopening retries without cleanup'
+)
+
+legacy_cache_records_remain_usable() (
+  local anchor="$TMP_ROOT/legacy-cache"
+  mkdir -p "$anchor"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  jq --arg cache "$FM_HOME/cache" '.options.XDG_CACHE_HOME = $cache' "$anchor/.firstmate/flagship.json" > "$TMP_ROOT/legacy-record"
+  mv "$TMP_ROOT/legacy-record" "$anchor/.firstmate/flagship.json"
+  cp "$anchor/.firstmate/flagship.json" "$TMP_ROOT/legacy-before"
+  bash "$ANCHOR_CLI" run --anchor "$anchor" -- bash -c '[ "$XDG_CACHE_HOME" = "$1" ]' bash "$XDG_CACHE_HOME" || fail 'legacy cache option blocked launch or changed host cache'
+  cmp -s "$TMP_ROOT/legacy-before" "$anchor/.firstmate/flagship.json" || fail 'launch silently rewrote a legacy record'
+  jq '.options.XDG_CACHE_HOME = "/outside"' "$anchor/.firstmate/flagship.json" > "$TMP_ROOT/legacy-invalid"
+  mv "$TMP_ROOT/legacy-invalid" "$anchor/.firstmate/flagship.json"
+  if bash "$ANCHOR_CLI" check --anchor "$anchor" >/dev/null 2>&1; then fail 'invalid legacy cache option was accepted'; fi
+  pass 'valid old cache records launch without redirecting host paths or silently rewriting metadata'
+)
+
+interrupted_initialization_resumes() (
+  local phase anchor fakebin="$TMP_ROOT/init-interrupt-bin"
+  mkdir -p "$fakebin"
+  export FM_TEST_REAL_PYTHON
+  FM_TEST_REAL_PYTHON=$(command -v python3)
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\nexec "$FM_TEST_REAL_PYTHON" "%s/tests/fixtures/fm-vessel-init-interrupt.py" "$@"\n' "$ROOT" > "$fakebin/python3"
+  chmod +x "$fakebin/python3"
+  for phase in before-payload after-backend after-record; do
+    anchor="$TMP_ROOT/init-$phase"
+    mkdir -p "$anchor"
+    configure "$anchor"
+    if FM_TEST_INIT_INTERRUPT="$phase" PATH="$fakebin:$PATH" bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/init-error" 2>&1; then fail "interrupted initialization succeeded: $phase"; fi
+    [ -f "$anchor/.firstmate/flagship.init.json" ] || fail "initialization did not reserve recoverable state: $phase"
+    cp "$anchor/.firstmate/flagship.init.json" "$TMP_ROOT/init-reservation"
+    if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/init-forbidden" >/dev/null 2>&1; then fail 'unfinished initialization launched work'; fi
+    bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- touch "$TMP_ROOT/init-resumed" </dev/null >/dev/null || fail "opening did not resume initialization: $phase"
+    [ ! -e "$anchor/.firstmate/flagship.init.json" ] && [ -f "$TMP_ROOT/init-resumed" ] || fail 'resumed initialization did not finish'
+    cmp -s "$TMP_ROOT/init-reservation" "$anchor/.firstmate/flagship.json" || fail 'initialization changed vessel identity while resuming'
+    [ "$(< "$FM_CONFIG_OVERRIDE/backend")" = tmux ] && [ "$(< "$NM_HOME/config.yaml")" = 'agent: "pi"' ] || fail 'initialization lost default configuration'
+  done
+  pass 'initialization reserves its identity before payload writes and opening resumes interruptions without adopting unrelated state'
+)
+
+projects_use_main_then_master_or_skip() (
+  local anchor="$TMP_ROOT/branch-selection" project branch
+  mkdir -p "$anchor"
+  configure "$anchor"
+  for project in both legacy unsupported; do
+    branch=main
+    [ "$project" != legacy ] || branch=master
+    [ "$project" != unsupported ] || branch=trunk
+    git init -qb "$branch" "$anchor/$project"
+    git -C "$anchor/$project" remote add origin "https://example.invalid/$project.git"
+    printf '%s\n' "$branch" > "$anchor/$project/file"
+    git -C "$anchor/$project" add file
+    git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$anchor/$project" commit -qm initial
+  done
+  git -C "$anchor/both" branch master
+  printf 'n\ny\n' | bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- touch "$TMP_ROOT/branches-launched" >"$TMP_ROOT/branches-output" 2>&1 || fail 'branch fallback blocked opening'
+  [ -f "$TMP_ROOT/branches-launched" ] || fail 'branch provisioning prevented launch'
+  [ "$(git -C "$FM_PROJECTS_OVERRIDE/both" branch --show-current)" = main ] || fail 'main was not preferred'
+  [ "$(git -C "$FM_PROJECTS_OVERRIDE/legacy" branch --show-current)" = master ] || fail 'master fallback was not used'
+  [ "$(git -C "$FM_PROJECTS_OVERRIDE/legacy" config branch.master.remote)" = origin ] || fail 'master did not track origin'
+  [ "$(git -C "$FM_PROJECTS_OVERRIDE/legacy" config remote.origin.fetch)" = '+refs/heads/master:refs/remotes/origin/master' ] || fail 'master fetch was not branch-limited'
+  [ ! -e "$FM_PROJECTS_OVERRIDE/unsupported" ] || fail 'a repository without main/master was cloned'
+  rg -q 'skipping unsupported: no local main or master branch' "$TMP_ROOT/branches-output" || fail 'skipped branch was not explained'
+  printf 'travelling changes\n' > "$FM_PROJECTS_OVERRIDE/legacy/file"
+  bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- true </dev/null >/dev/null || fail 'reopening failed'
+  [ "$(< "$FM_PROJECTS_OVERRIDE/legacy/file")" = 'travelling changes' ] || fail 'reopening replaced existing work'
+  pass 'automatic provisioning prefers main, falls back to master, skips other branches and preserves existing clones'
+)
+
+sailing_can_cancel_without_losing_work() (
+  setup_harbors cancel-sail
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'source work\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'copy failure unexpectedly succeeded'; fi
+  activate_harbor desktop
+  touch "$FM_FIXTURE_WORLD/laptop.no-inbound"
+  cp "$FM_ANCHOR/.firstmate/flagship.json" "$TMP_ROOT/cancel-before"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null 2>&1; then fail 'unreachable destination allowed cancellation'; fi
+  cmp -s "$TMP_ROOT/cancel-before" "$FM_ANCHOR/.firstmate/flagship.json" || fail 'failed cancellation changed source ownership'
+  rm "$FM_FIXTURE_WORLD/laptop.no-inbound"
+  exec 8>> "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.lock"
+  flock -n 8
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null 2>&1; then fail 'busy destination allowed cancellation'; fi
+  exec 8>&-
+  cmp -s "$TMP_ROOT/cancel-before" "$FM_ANCHOR/.firstmate/flagship.json" || fail 'busy destination changed source ownership'
+  cp "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.json" "$TMP_ROOT/cancel-destination"
+  jq '.vessel_id = "00000000-0000-0000-0000-000000000000"' "$TMP_ROOT/cancel-destination" > "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.json"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null 2>&1; then fail 'unrelated destination allowed cancellation'; fi
+  cmp -s "$TMP_ROOT/cancel-before" "$FM_ANCHOR/.firstmate/flagship.json" || fail 'unrelated destination changed source ownership'
+  cp "$TMP_ROOT/cancel-destination" "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.json"
+  touch "$FM_FIXTURE_WORLD/laptop.fail-cancel-after"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null 2>&1; then fail 'lost cancellation acknowledgement reanchored the source'; fi
+  cmp -s "$TMP_ROOT/cancel-before" "$FM_ANCHOR/.firstmate/flagship.json" || fail 'lost cancellation acknowledgement changed source ownership'
+  rm "$FM_FIXTURE_WORLD/laptop.fail-cancel-after"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null || fail 'cancellation could not retry after a lost acknowledgement'
+  bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- true </dev/null >/dev/null || fail 'source could not reopen after cancellation'
+  [ "$(< "$FM_HOME/projects/work")" = 'source work' ] || fail 'cancellation changed source work'
+  jq -e '.anchored and (has("sailing_to") | not)' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'cancellation did not reanchor source'
+  jq -e '.anchored == false and .last_known_harbor == "desktop" and (has("sailing_to") | not)' "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.json" >/dev/null || fail 'destination arrival was not revoked'
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" >/dev/null || fail 'a cancelled destination could not sail again'
+  [ "$(< "$FM_HOME/projects/work")" = 'source work' ] || fail 'sailing after cancellation lost work'
+  activate_harbor desktop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null 2>&1; then fail 'cancellation duplicated an active destination'; fi
+  pass 'cancellation verifies and revokes the destination, retries lost acknowledgements, preserves work and refuses an active arrival'
+)
+
+source_stop_refusal_can_cancel_before_registration() (
+  setup_harbors cancel-before-copy
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf '#!/bin/sh\nexit 77\n' > "$FM_FIXTURE_WORLD/fakebin/no-mistakes"
+  chmod +x "$FM_FIXTURE_WORLD/fakebin/no-mistakes"
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'refused source stop unexpectedly sailed'; fi
+  [ ! -e "$FM_ANCHOR/.firstmate/flagship.json" ] && [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'stop refusal registered or copied an arrival'
+  activate_harbor desktop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null || fail 'a source stop refusal could not cancel before destination registration'
+  bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- true </dev/null >/dev/null || fail 'source could not reopen after a refused stop was cancelled'
+  pass 'a refused source stop can be cancelled safely before any destination registration or copying'
+)
+
+cancellation_revokes_delayed_activation() (
+  setup_harbors cancel-activation
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'source work\n' > "$FM_HOME/projects/work"
+  touch "$FM_FIXTURE_WORLD/laptop.fail-activate"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'activation failure unexpectedly succeeded'; fi
+  jq -n --slurpfile source "$FM_ANCHOR/.firstmate/flagship.json" --slurpfile expected "$FM_FIXTURE_WORLD/hosts/laptop/anchor/.firstmate/flagship.json" '{source:$source[0],expected:$expected[0]}' > "$TMP_ROOT/delayed-activation"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --cancel >/dev/null || fail 'an unactivated committed arrival could not cancel'
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" _peer --anchor "$FM_ANCHOR" --op activate < "$TMP_ROOT/delayed-activation" >/dev/null 2>&1; then fail 'a delayed activation survived cancellation'; fi
+  [ "$(< "$FM_HOME/projects/work")" = 'source work' ] || fail 'cancellation deleted partial destination data'
+  activate_harbor desktop
+  printf 'new source work\n' > "$FM_HOME/projects/work"
+  rm "$FM_FIXTURE_WORLD/laptop.fail-activate"
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'new copy failure unexpectedly succeeded'; fi
+  activate_harbor laptop
+  if bash "$ANCHOR_CLI" _peer --anchor "$FM_ANCHOR" --op activate < "$TMP_ROOT/delayed-activation" >/dev/null 2>&1; then fail 'old activation enabled a later transfer before copying'; fi
+  jq -e '.anchored == false' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'stale activation changed arrival ownership'
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  activate_harbor desktop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null || fail 'new transfer could not finish after rejecting stale activation'
+  activate_harbor laptop
+  [ "$(< "$FM_HOME/projects/work")" = 'new source work' ] || fail 'new transfer lost current source work'
+  pass 'cancellation invalidates delayed activation even after a new transfer to the same destination begins'
+)
+
+opening_offers_sailing_recovery() (
+  local scenario side choice input rc marker
+  for scenario in source:r source:c destination:r destination:c source:q destination:eof committed:c committed-destination:c; do
+    side=${scenario%:*}
+    choice=${scenario#*:}
+    setup_harbors "open-recovery-$side-$choice"
+    bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+    printf 'source work\n' > "$FM_HOME/projects/work"
+    if [[ "$side" = committed* ]]; then
+      touch "$FM_FIXTURE_WORLD/laptop.fail-activate"
+      if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --to laptop >/dev/null 2>&1; then fail 'activation failure unexpectedly succeeded'; fi
+      rm "$FM_FIXTURE_WORLD/laptop.fail-activate"
+      [ "$side" != committed-destination ] || activate_harbor laptop
+    else
+      activate_harbor laptop
+      touch "$FM_FIXTURE_WORLD/fail-copy"
+      if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then fail 'copy failure unexpectedly succeeded'; fi
+      rm "$FM_FIXTURE_WORLD/fail-copy"
+      [ "$side" != source ] || activate_harbor desktop
+    fi
+    marker="$TMP_ROOT/recovery-launched-$side-$choice"
+    cp "$FM_ANCHOR/.firstmate/flagship.json" "$TMP_ROOT/recovery-before"
+    input="$choice"$'\n'
+    [ "$choice" != eof ] || input=''
+    rc=0
+    printf '%s' "$input" | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$marker" >"$TMP_ROOT/recovery-output" 2>"$TMP_ROOT/recovery-prompt" || rc=$?
+    rg -q '\[r\]esume sailing, \[c\]ancel transfer, or \[q\]uit' "$TMP_ROOT/recovery-prompt" || fail "opening did not offer recovery: $scenario"
+    case "$scenario" in
+      source:q|destination:eof)
+        [ "$rc" -ne 0 ] && [ ! -e "$marker" ] || fail 'quitting recovery launched work'
+        cmp -s "$TMP_ROOT/recovery-before" "$FM_ANCHOR/.firstmate/flagship.json" || fail 'quitting recovery changed ownership'
+        ;;
+      source:r|destination:c|committed-destination:c)
+        [ "$rc" -eq 0 ] && [ ! -e "$marker" ] || fail "recovery launched at the wrong harbor: $scenario"
+        jq -e '.anchored == false' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'an inactive local copy became active'
+        ;;
+      *)
+        [ "$rc" -eq 0 ] && [ -f "$marker" ] || fail "recovery did not reopen here: $scenario (exit $rc): $(< "$TMP_ROOT/recovery-prompt") $(< "$TMP_ROOT/recovery-output")"
+        jq -e '.anchored' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'recovery did not activate the local vessel'
+        ;;
+    esac
+  done
+  for args in '--cancel --to laptop' '--cancel --from desktop' '--cancel --cancel'; do
+    # Deliberate splitting supplies conflicting sail options.
+    # shellcheck disable=SC2086
+    if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" $args >/dev/null 2>&1; then fail 'conflicting cancellation options were accepted'; fi
+  done
+  pass 'ordinary reopening offers resume, cancel or quit at either harbor, including committed arrivals, without launching an inactive copy'
+)
 
 opening_initializes_and_preserves_runtime_arguments() (
   local anchor="$TMP_ROOT/open anchor" rc=0
@@ -117,7 +377,7 @@ named_vessels_are_independent() (
   bash "$ANCHOR_CLI" run --anchor "$anchor" --vessel red -- bash -c '
     [ "$FM_VESSEL" = red ] && [ "$FM_HOME" = "$FM_ANCHOR/.firstmate/red" ] &&
     [ "$NM_HOME" = "$FM_HOME/no-mistakes" ] && [ "$TMUX_TMPDIR" = "$FM_HOME/tmux" ] &&
-    [ "$PI_CODING_AGENT_SESSION_DIR" = "$FM_HOME/pi/sessions" ] && [ "$XDG_CACHE_HOME" = "$FM_HOME/cache" ]
+    [ "$PI_CODING_AGENT_SESSION_DIR" = "$FM_HOME/pi/sessions" ]
   ' || fail 'named launch exported another vessel configuration'
   bash "$ANCHOR_CLI" status --anchor "$anchor" --vessel red | jq -e --argjson pid "$writer" '.processes | all(.pid != $pid)' >/dev/null || fail 'a sibling vessel was counted as red work'
   bash "$ANCHOR_CLI" stop --anchor "$anchor" --vessel red >/dev/null || fail 'stopping red was blocked by sibling work'
@@ -452,7 +712,7 @@ vessel_projects_clone_origins_only_when_missing() (
 )
 
 vessel_project_failures_block_launch_and_can_retry() (
-  local anchor="$TMP_ROOT/missing origin" origin="$TMP_ROOT/retry-origin"
+  local anchor="$TMP_ROOT/missing origin" origin="$TMP_ROOT/retry-origin" fakebin="$TMP_ROOT/clone-failure-bin"
   mkdir -p "$anchor"
   git init -qb main "$anchor/repo"
   configure "$anchor"
@@ -469,13 +729,21 @@ vessel_project_failures_block_launch_and_can_retry() (
   [ ! -e "$FM_PROJECTS_OVERRIDE/empty-url" ] || fail 'a repository with an empty origin URL was cloned'
   git -C "$anchor/repo" config "url.$origin.insteadOf" 'fixture-origin:'
   git -C "$anchor/repo" remote add origin 'fixture-origin:'
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'failed clone was ignored'; fi
-  [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'failed clone was left as an existing destination'
-  if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/failed-clone-launched" >/dev/null 2>&1; then fail 'failed clone permitted launch'; fi
-  [ ! -e "$TMP_ROOT/failed-clone-launched" ] || fail 'failed clone executed the launch command'
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >"$TMP_ROOT/no-branch" 2>&1 || fail 'an unborn branch blocked initialization'
+  rg -q 'no local main or master branch' "$TMP_ROOT/no-branch" || fail 'unborn branch skip was not explained'
+  [ ! -e "$FM_PROJECTS_OVERRIDE/repo" ] || fail 'an unborn branch was cloned'
   printf 'available locally\n' > "$anchor/repo/file"
   git -C "$anchor/repo" add file
   git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$anchor/repo" commit -qm main
+  mkdir -p "$fakebin"
+  export FM_TEST_REAL_GIT
+  FM_TEST_REAL_GIT=$(command -v git)
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\n[ "$1" != clone ] || exit 77\nexec "$FM_TEST_REAL_GIT" "$@"\n' > "$fakebin/git"
+  chmod +x "$fakebin/git"
+  if PATH="$fakebin:$PATH" bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'failed clone was ignored'; fi
+  if PATH="$fakebin:$PATH" bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/failed-clone-launched" >/dev/null 2>&1; then fail 'failed clone permitted launch'; fi
+  [ ! -e "$TMP_ROOT/failed-clone-launched" ] || fail 'failed clone executed the launch command'
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   [ -d "$FM_PROJECTS_OVERRIDE/repo/.git" ] || fail 'failed provisioning could not be retried'
   [ "$(git -C "$FM_PROJECTS_OVERRIDE/repo" remote get-url origin)" = "$origin" ] || fail 'source origin URL rewriting was lost'
@@ -485,7 +753,7 @@ vessel_project_failures_block_launch_and_can_retry() (
   if bash "$ANCHOR_CLI" run --anchor "$anchor" -- touch "$TMP_ROOT/broken-config-launched" >"$TMP_ROOT/broken-origin" 2>&1; then fail 'a broken Git configuration was treated as a missing origin'; fi
   rg -q 'cannot read origin' "$TMP_ROOT/broken-origin" || fail 'broken Git configuration diagnostics were hidden'
   [ ! -e "$TMP_ROOT/broken-config-launched" ] || fail 'broken Git configuration permitted launch'
-  pass 'missing and empty origins warn and skip; missing main and broken Git configuration block launch; retry seeds locally without origin access'
+  pass 'missing origins and branches warn and skip; clone and configuration failures block launch and can retry'
 )
 
 pushing_anchors_the_destination_without_reverse_ssh() (
@@ -649,7 +917,7 @@ scuttling_requires_confirmation_and_preserves_outside_files() (
   printf 'keep\n' > "$outside/shared"
   chmod 444 "$outside/shared"
   chmod 500 "$outside"
-  mkdir -p "$FM_STATE_OVERRIDE/task.git-hooks"
+  mkdir -p "$FM_STATE_OVERRIDE/task.git-hooks" "$FM_HOME/cache"
   printf 'hook\n' > "$FM_STATE_OVERRIDE/task.git-hooks/pre-commit"
   chmod 500 "$FM_STATE_OVERRIDE/task.git-hooks" "$FM_STATE_OVERRIDE/task.git-hooks/pre-commit"
   ln "$outside/shared" "$FM_HOME/cache/hardlinked"
@@ -726,8 +994,7 @@ SH
 
 setup_harbors() {
   export FM_FIXTURE_WORLD="$TMP_ROOT/$1" FM_FIXTURE_HARBOR=''
-  export FM_REAL_RSYNC
-  FM_REAL_RSYNC=$(command -v rsync)
+  export FM_REAL_RSYNC="$REAL_RSYNC"
   mkdir -p "$FM_FIXTURE_WORLD/fakebin"
   for host in desktop laptop third; do
     mkdir -p "$FM_FIXTURE_WORLD/hosts/$host/anchor/.firstmate" "$FM_FIXTURE_WORLD/hosts/$host/home/.local/share"
@@ -765,9 +1032,10 @@ sailing_copies_and_redirects_origin() (
   printf 'tracked\n' > "$FM_HOME/projects/repo/file"
   git -C "$FM_HOME/projects/repo" add file
   git -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@example.invalid -C "$FM_HOME/projects/repo" commit -qm initial
-  mv "$FM_HOME/projects/repo/.git/objects" "$XDG_CACHE_HOME/git-objects"
+  mkdir -p "$FM_HOME/cache"
+  mv "$FM_HOME/projects/repo/.git/objects" "$FM_HOME/cache/git-objects"
   mkdir -p "$FM_HOME/projects/repo/.git/objects/info"
-  printf '%s\n' "$XDG_CACHE_HOME/git-objects" > "$FM_HOME/projects/repo/.git/objects/info/alternates"
+  printf '%s\n' "$FM_HOME/cache/git-objects" > "$FM_HOME/projects/repo/.git/objects/info/alternates"
   git -c core.hooksPath=/dev/null -C "$FM_HOME/projects/repo" worktree add -qb task "$TREEHOUSE_ROOT/task"
   printf 'uncommitted\n' > "$TREEHOUSE_ROOT/task/file"
   activate_harbor laptop
@@ -970,4 +1238,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock
+fm_test_run host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock

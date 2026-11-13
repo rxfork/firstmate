@@ -259,11 +259,13 @@ prepare_vessel_spawn_case() {
   export FM_ANCHOR FM_VESSEL=red
   mkdir -p "$FM_ANCHOR"
   (
-    unset FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE \
-      TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR
-    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$FM_ANCHOR" --vessel red --agent pi >/dev/null
+    unset FM_HOME FM_BACKEND FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PROJECTS_OVERRIDE
+    TREEHOUSE_ROOT='' NM_HOME='' LAVISH_AXI_STATE_DIR='' PI_CODING_AGENT_SESSION_DIR='' \
+      bash "$ROOT/bin/fm-anchor.sh" init --anchor "$FM_ANCHOR" --vessel red --agent pi >/dev/null
   ) || fail 'could not initialize the fixture vessel'
   HOME_DIR="$FM_ANCHOR/.firstmate/red"
+  export TREEHOUSE_ROOT="$HOME_DIR/worktrees" NM_HOME="$HOME_DIR/no-mistakes"
+  export LAVISH_AXI_STATE_DIR="$HOME_DIR/lavish-axi" PI_CODING_AGENT_SESSION_DIR="$HOME_DIR/pi/sessions"
   fm_test_spawn_home "$HOME_DIR" codex
   fm_test_spawn_brief "$HOME_DIR" "$id" 'Exercise vessel worker routing.'
 }
@@ -271,6 +273,7 @@ prepare_vessel_spawn_case() {
 test_vessel_workers_use_vessel_repositories() {
   local rec id out status
   local FM_ANCHOR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
+  local TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR
   id=vessel-project-z6
   rec=$(make_settle_case vessel-project "$id" 0)
   read_settle_record "$rec"
@@ -301,6 +304,7 @@ test_vessel_workers_use_vessel_repositories() {
 test_vessel_worktrees_must_travel_with_the_vessel() {
   local rec id out status
   local FM_ANCHOR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
+  local TREEHOUSE_ROOT NM_HOME LAVISH_AXI_STATE_DIR PI_CODING_AGENT_SESSION_DIR
   id=vessel-worktree-z7
   rec=$(make_settle_case vessel-worktree "$id" 0)
   read_settle_record "$rec"

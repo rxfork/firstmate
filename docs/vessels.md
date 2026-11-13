@@ -14,6 +14,7 @@ This interface supports Linux anchoring, starting work and stopping source work 
 The default vessel is `flagship`; `--vessel NAME` selects another independent vessel for any operation.
 Names use 1-64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit.
 The anchor contains one `.firstmate/` container, with each payload at `NAME/` and its `NAME.json` record and `NAME.lock` coordination file alongside it.
+An interrupted initialization reserves its identity in `NAME.init.json`; `open` or `init` resumes it before allowing work, without adopting unrelated unregistered files.
 Each vessel has its own identity, repositories, conversations, tool state, tmux sockets and one active harbor.
 Other named vessels may remain active at different harbors; sailing, stopping and scuttling affect only the selected vessel.
 There is no shared manifest or anchor-wide operation lock.
@@ -60,15 +61,15 @@ Every harbor must use the same physical anchor path and selected directory optio
 ## Working repositories
 
 `init` and `run` discover independent repositories under the anchor, skipping `.firstmate`, directory symlinks, linked Git worktrees and repository contents.
-For each missing vessel project they clone the local checkout's `main` branch into the selected projects directory, preserving its anchor-relative path; a repository at the anchor itself uses the anchor's basename.
-The source checkout becomes remote `local`, its original origin URL becomes remote `origin`, and `main` tracks `origin` with a main-only fetch specification.
+For each missing vessel project they clone local `main`, falling back to local `master`, into the selected projects directory, preserving its anchor-relative path; a repository at the anchor itself uses the anchor's basename.
+The source checkout becomes remote `local`, its original origin URL becomes remote `origin`, and the selected branch tracks `origin` with a single-branch fetch specification.
 Seeding makes no request to origin; the first origin fetch populates its remote-tracking ref.
 Normal local cloning reuses immutable Git objects through hardlinks where possible, without borrowing an outside object directory.
 Borrowed source objects are dissociated so the vessel remains usable after outside repositories disappear.
 Existing vessel clones are left untouched, so host repositories cannot overwrite travelling work.
-Repositories without an origin URL are skipped with a diagnostic during initialization and launch.
-Other Git errors, missing local `main` branches and clone failures still stop initialization or launch; fix the source checkout and retry.
-Committed local `main` history is seeded, including unpublished commits, but other branches and uncommitted changes are not.
+Repositories without an origin URL or either local branch are skipped with a diagnostic during initialization and launch.
+Other Git errors and clone failures still stop initialization or launch; fix the source checkout and retry.
+Committed history from the selected branch is seeded, including unpublished commits, but other branches and uncommitted changes are not.
 The `local` remote is optional convenience; ordinary vessel work uses origin, since the outside checkout may not exist on another harbor.
 No manifests or host provisioning tools are required.
 
@@ -80,7 +81,9 @@ Their working copies and common Git directories must remain inside the vessel, s
 
 Core supplies portable directory defaults and defaults No-mistakes to descendant daemon mode with `NM_TEST_START_DAEMON=1` (No-mistakes 1.111+).
 Explicit supported directory overrides must still resolve inside the vessel and match its recorded configuration; conflicting inherited anchor/home settings refuse.
-The tmux socket directory and cache are always vessel-local, and ambient multiplexer routing is cleared.
+The tmux socket directory is vessel-local and ambient multiplexer routing is cleared.
+Host XDG paths, including an unset `XDG_CACHE_HOME`, remain unchanged and are not vessel directory options.
+Existing records with the former vessel-cache option remain readable, but that option is no longer exported or required for launch.
 `run` exports the resolved environment before executing its command, so Nono and Pi inherit it without shell sourcing or `eval`.
 
 `FM_WORKER_ENV_FORWARD` is one cumulative, whitespace-separated list of variable names.
@@ -119,13 +122,26 @@ Files removed at the source are deleted from the receiving cache, unchanged file
 There is no staging directory or automatic archive of the previous cache.
 Host tools, authentication, tmux sockets and the old primary-session lock are not transported.
 Durable state, repositories, linked Git worktrees, uncommitted changes and primary conversations are copied without rewriting paths or preferences.
-Vessel-local cache is retained because repositories can reference object storage there.
+Existing files under a vessel's `cache/` directory still travel as ordinary payload; no host cache directory is redirected or collected.
 Other persisted runtime records are left to ordinary Firstmate recovery; transfer does not resume worker processes.
 The origin retains its payload only as an unanchored cache; discovery never treats such a cache as an anchored source.
 A matching in-progress handoff can resume at its reserved destination, including recovery after a lost origin acknowledgement.
 The sibling record and lock and other anchor contents are outside rsync's deletion scope.
 After interruption, retry `sail` at the destination; copy or origin-acknowledgement failure keeps that destination inactive and never falls through to initialization.
 If every reachable hint is stale, supply a known source explicitly with `--from` rather than guessing or creating a replacement.
+
+Reopening an unfinished sail prompts to resume sailing, cancel the transfer, or quit without changes.
+Resuming at the source sends the vessel to its reserved destination; resuming at the destination pulls it from the source.
+Cancelling at the source reopens it there; cancelling at the destination forwards the request to the source and exits without launching an incomplete local vessel.
+Explicit cancellation is also available as `sail --cancel` (or `firstmate ANCHOR sail --cancel` through the personal launcher).
+Cancellation locks and revokes the destination's inactive arrival before reopening the source; it preserves both payloads and invalidates delayed activation requests.
+Each handoff is identified separately, including push retries, so an old acknowledgement cannot activate a later transfer.
+An active, unreachable, busy or unrelated destination prevents cancellation rather than risking two active copies.
+A lost cancellation acknowledgement leaves the source inactive, and the same cancellation can be retried.
+
+```sh
+bash bin/fm-anchor.sh sail --anchor /absolute/anchor --cancel
+```
 
 ### Sending before the source goes offline
 
@@ -181,7 +197,7 @@ bash bin/fm-anchor.sh scuttle --anchor /absolute/anchor --confirm
 
 Core stops local work first, waiting and retrying when the existing primary has been asked to finish cleanup.
 It refuses deletion if cleanup still cannot be confirmed; an accepted request is not treated as proof that work stopped.
-It removes only `<anchor>/.firstmate/NAME`, `NAME.json` and `NAME.lock`, not the `.firstmate/` container, other named vessels, outside repositories or other harbors.
+It removes only `<anchor>/.firstmate/NAME`, `NAME.json`, any unfinished `NAME.init.json` reservation and `NAME.lock`, not the `.firstmate/` container, other named vessels, outside repositories or other harbors.
 Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
 Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.
 The coordination lock is removed last, and competing operations must reject an old unlinked lock inode.
@@ -190,6 +206,6 @@ There is no trash, backup or force-stop fallback.
 ## Verification
 
 Run `bash bin/fm-test-run.sh tests/fm-anchor.test.sh` for the executable anchoring/gate contract.
-The core cases also exercise independent names, read-only listing, sibling locks and live work, name/path validation, portable environment defaults, cumulative forwarding, empty incoming lists, nested execution and simulated multi-harbor sailing.
+The core cases also exercise interrupted initialization, unchanged host XDG paths, branch fallback, cancellation and delayed activation, independent names, read-only listing, sibling locks and live work, name/path validation, portable environment defaults, cumulative forwarding, empty incoming lists, nested execution and simulated multi-harbor sailing.
 The harbor fixtures execute real core peer commands and real local rsync copies without accessing live vessels or SSH servers.
 Interactive Pi/Nono startup and tmux worker launch must be tested in a terminal with PTY access; these checks are not a claim that an interactive session ran.

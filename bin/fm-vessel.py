@@ -19,8 +19,14 @@ prepared record, clears sailing_to and updates the origin's last-known hint.
 Rsync incrementally mirrors into the same receiver directory with deletions;
 inactive local state is disposable cache, not a backup or an anchored source.
 The destination activates only after acknowledgement and a complete sync.
-Interrupted transfers remain inactive and retry against that cache. There are
-no transfer receipts, leases, global registry or generic process manager.
+Interrupted transfers remain inactive and retry against that cache.
+Sail --cancel revokes the destination's inactive arrival under its
+lock before reanchoring the source. Active or unreachable destinations refuse.
+Each handoff has a fresh handoff_id so delayed acknowledgements cannot activate
+another transfer after cancellation or a round trip.
+Initialization reserves NAME.init.json before writing payload files and resumes
+that same identity after interruption. Host XDG paths are never redirected.
+There are no transfer receipts, leases, global registry or generic process manager.
 
 Stopping uses recorded workers' fm-control exit, the home-scoped watcher stop,
 and no-mistakes daemon stop without force. A verified vessel-local primary Pi
@@ -75,7 +81,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 BASE_FIELDS = {"version", "anchored", "anchor", "harbor", "backend", "options"}
-ROUTE_FIELDS = {"vessel_id", "last_known_harbor", "known_harbors", "sailing_to"}
+ROUTE_FIELDS = {
+    "vessel_id",
+    "last_known_harbor",
+    "known_harbors",
+    "sailing_to",
+    "handoff_id",
+}
 OPTION_NAMES = {
     "FM_HOME",
     "FM_CONFIG_OVERRIDE",
@@ -87,7 +99,6 @@ OPTION_NAMES = {
     "LAVISH_AXI_STATE_DIR",
     "PI_CODING_AGENT_SESSION_DIR",
     "TMUX_TMPDIR",
-    "XDG_CACHE_HOME",
 }
 SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 # Each CLI process selects one vessel; SSH peers receive the selection explicitly.
@@ -145,13 +156,23 @@ def validate_configuration(record, anchor, vessel_name=None):
     if record["anchor"] != str(anchor) or type(record["anchored"]) is not bool:
         fail("anchor path differs; sailing requires identical physical paths")
     record["harbor"] = harbor_name(record["harbor"])
+    vessel = vessel_path(anchor, name=vessel_name)
+    options = record.get("options")
+    if isinstance(options, dict) and "XDG_CACHE_HOME" in options:
+        cache = options["XDG_CACHE_HOME"]
+        if cache != str(vessel / "cache") or not Path(cache).resolve().is_relative_to(
+            vessel
+        ):
+            fail("legacy XDG_CACHE_HOME does not match the vessel layout")
+        record["options"] = {
+            name: value for name, value in options.items() if name != "XDG_CACHE_HOME"
+        }
     if (
         record["backend"] != "tmux"
         or not isinstance(record["options"], dict)
         or set(record["options"]) != OPTION_NAMES
     ):
         fail("invalid vessel configuration")
-    vessel = vessel_path(anchor, name=vessel_name)
     for value in record["options"].values():
         if (
             not isinstance(value, str)
@@ -162,7 +183,6 @@ def validate_configuration(record, anchor, vessel_name=None):
     for name, directory in (
         ("FM_HOME", vessel),
         ("TMUX_TMPDIR", vessel / "tmux"),
-        ("XDG_CACHE_HOME", vessel / "cache"),
     ):
         if record["options"][name] != str(directory):
             fail(f"{name} does not match the vessel layout")
@@ -172,9 +192,8 @@ def validate_configuration(record, anchor, vessel_name=None):
 def validate_record(record, anchor, vessel_name=None):
     if not isinstance(record, dict):
         fail("invalid vessel record")
-    fields = BASE_FIELDS | (ROUTE_FIELDS - {"sailing_to"})
-    if "sailing_to" in record:
-        fields |= {"sailing_to"}
+    fields = BASE_FIELDS | (ROUTE_FIELDS - {"sailing_to", "handoff_id"})
+    fields |= set(record) & {"sailing_to", "handoff_id"}
     if set(record) != fields:
         fail("invalid vessel record")
     record.update(
@@ -200,6 +219,11 @@ def validate_record(record, anchor, vessel_name=None):
         record["last_known_harbor"],
     }.issubset(known):
         fail("invalid known harbors")
+    if "handoff_id" in record and (
+        not isinstance(record["handoff_id"], str)
+        or str(uuid.UUID(record["handoff_id"])) != record["handoff_id"]
+    ):
+        fail("invalid handoff identity")
     if "sailing_to" in record:
         record["sailing_to"] = harbor_name(record["sailing_to"])
         if record["anchored"] or record["sailing_to"] not in known:
@@ -207,8 +231,8 @@ def validate_record(record, anchor, vessel_name=None):
     return record
 
 
-def read_record(anchor, name=None):
-    path = vessel_path(anchor, ".json", name)
+def read_record(anchor, name=None, suffix=".json"):
+    path = vessel_path(anchor, suffix, name)
     if path.is_symlink() or not path.is_file():
         fail("vessel record must be a regular file")
     with path.open() as stream:
@@ -219,9 +243,9 @@ def record_configuration(record):
     return {key: value for key, value in record.items() if key not in ROUTE_FIELDS}
 
 
-def write_record(anchor, record):
+def write_record(anchor, record, suffix=".json"):
     validate_record(record, anchor)
-    if vessel_path(anchor, ".json").is_symlink():
+    if vessel_path(anchor, suffix).is_symlink():
         fail("vessel record must not be a symlink")
     fd, name = tempfile.mkstemp(
         prefix=f".{VESSEL_NAME}.json.", dir=vessel_path(anchor).parent
@@ -232,7 +256,7 @@ def write_record(anchor, record):
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, vessel_path(anchor, ".json"))
+        os.replace(name, vessel_path(anchor, suffix))
         directory = os.open(vessel_path(anchor).parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -294,6 +318,52 @@ def check_payload(anchor, record, payload=None):
         or backend.read_bytes().rstrip(b"\n") != b"tmux"
     ):
         fail("vessel backend configuration changed")
+
+
+def initialize(anchor, expected, agent):
+    pending = vessel_path(anchor, ".init.json")
+    if pending.exists():
+        record = read_record(anchor, suffix=".init.json")
+        if record_configuration(record) != expected:
+            fail("initialization options changed; original reservation was preserved")
+        if vessel_path(anchor, ".json").exists() and read_record(anchor) != record:
+            fail("vessel changed during initialization")
+    else:
+        vessel = vessel_path(anchor)
+        if vessel.exists() and (not vessel.is_dir() or any(vessel.iterdir())):
+            fail("refusing to adopt nonempty unregistered vessel state")
+        record = {
+            **expected,
+            "vessel_id": str(uuid.uuid4()),
+            "last_known_harbor": expected["harbor"],
+            "known_harbors": [expected["harbor"]],
+        }
+        write_record(anchor, record, suffix=".init.json")
+    for directory in record["options"].values():
+        Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
+    defaults = {
+        Path(record["options"]["FM_CONFIG_OVERRIDE"]) / "backend": "tmux\n",
+        Path(record["options"]["NM_HOME"]) / "config.yaml": f'agent: "{agent}"\n',
+    }
+    for path, content in defaults.items():
+        if path.exists():
+            continue
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+    check_payload(anchor, record)
+    write_record(anchor, record)
+    pending.unlink()
+    return record
 
 
 def provision_projects(anchor, record):
@@ -367,15 +437,40 @@ def provision_projects(anchor, record):
         )
         if origin.returncode or not origin.stdout.strip():
             fail(f"{source}: cannot read origin: {origin.stderr.strip()}")
+        for branch in ("main", "master"):
+            selected = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch}",
+                ],
+                check=False,
+            )
+            if selected.returncode == 0:
+                break
+            if selected.returncode != 1:
+                fail(f"{source}: cannot inspect local {branch} branch")
+        else:
+            print(
+                f"fm-anchor: skipping {relative}: no local main or master branch",
+                file=sys.stderr,
+            )
+            continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        print(f"fm-anchor: cloning {relative} into the vessel", file=sys.stderr)
+        print(
+            f"fm-anchor: cloning {relative} ({branch}) into the vessel", file=sys.stderr
+        )
         subprocess.run(
             [
                 "git",
                 "clone",
                 "--single-branch",
                 "--branch",
-                "main",
+                branch,
                 "--origin",
                 "local",
                 "--dissociate",
@@ -395,7 +490,7 @@ def provision_projects(anchor, record):
                 "remote",
                 "add",
                 "--track",
-                "main",
+                branch,
                 "origin",
                 origin.stdout.strip(),
             ],
@@ -409,7 +504,7 @@ def provision_projects(anchor, record):
                 str(destination),
                 "config",
                 "--local",
-                "branch.main.remote",
+                f"branch.{branch}.remote",
                 "origin",
             ],
             stdout=sys.stderr,
@@ -701,7 +796,7 @@ def stop_vessel(anchor, record):
     }
 
 
-def prepare_source(anchor, record, destination, known):
+def prepare_source(anchor, record, destination, known, handoff_id=None):
     if not shutil.which("rsync"):
         fail("rsync is required on the source harbor")
     retry = not record["anchored"] and (
@@ -715,6 +810,8 @@ def prepare_source(anchor, record, destination, known):
     record.update(
         anchored=False,
         sailing_to=destination,
+        handoff_id=(record.get("handoff_id") if retry else handoff_id)
+        or str(uuid.uuid4()),
         known_harbors=merge_harbors(known_harbors(record), known, [destination]),
     )
     write_record(anchor, record)
@@ -762,8 +859,9 @@ def check_receiver(record, source, local):
 
 def activate_payload(anchor, record):
     check_payload(anchor, record)
-    for name in ("TMUX_TMPDIR", "XDG_CACHE_HOME"):
-        Path(record["options"][name]).mkdir(parents=True, exist_ok=True, mode=0o700)
+    Path(record["options"]["TMUX_TMPDIR"]).mkdir(
+        parents=True, exist_ok=True, mode=0o700
+    )
     record = {**record, "anchored": True, "last_known_harbor": record["harbor"]}
     record.pop("sailing_to")
     write_record(anchor, record)
@@ -827,6 +925,27 @@ def peer(anchor, operation):
                 "error": error,
             }
         request = json.load(sys.stdin)
+        if operation == "cancel-source":
+            arrival = validate_record(request["arrival"], anchor)
+            record = read_record(anchor)
+            if (
+                arrival["harbor"] == local
+                or arrival["last_known_harbor"] != local
+                or arrival.get("sailing_to") != arrival["harbor"]
+                or record["harbor"] != local
+                or record["vessel_id"] != arrival["vessel_id"]
+                or record["options"] != arrival["options"]
+                or record.get("handoff_id") != arrival.get("handoff_id")
+                or (
+                    not record["anchored"]
+                    and record.get("sailing_to", record["last_known_harbor"])
+                    != arrival["harbor"]
+                )
+            ):
+                fail("source no longer owns this unfinished arrival")
+            if record["anchored"]:
+                record = {**record, "anchored": False, "sailing_to": arrival["harbor"]}
+            return {"here": local, "record": cancel_source(anchor, record, local)}
         if operation == "receive":
             source = validate_record(request["source"], anchor)
             record = (
@@ -859,6 +978,41 @@ def peer(anchor, operation):
             vessel.mkdir(mode=0o700, exist_ok=True)
             write_record(anchor, incoming)
             return {"here": local, "record": incoming}
+        if operation == "cancel":
+            source = validate_record(request["source"], anchor)
+            if (
+                source["anchored"]
+                or source["harbor"] == local
+                or source.get("sailing_to", source["last_known_harbor"]) != local
+            ):
+                fail("source is not sailing to this harbor")
+            record = (
+                read_record(anchor) if vessel_path(anchor, ".json").exists() else None
+            )
+            if record is None:
+                if source.get("sailing_to") != local:
+                    fail(
+                        "committed destination is missing; cannot prove arrival was inactive"
+                    )
+            else:
+                if (
+                    record["anchored"]
+                    or record["harbor"] != local
+                    or record["vessel_id"] != source["vessel_id"]
+                    or record["options"] != source["options"]
+                    or (
+                        "handoff_id" in record
+                        and record["handoff_id"] != source.get("handoff_id")
+                    )
+                    or record["last_known_harbor"] != source["harbor"]
+                    or record.get("sailing_to", local) != local
+                ):
+                    fail(
+                        "destination is active, unrelated or no longer awaiting this source"
+                    )
+                record.pop("sailing_to", None)
+                write_record(anchor, record)
+            return {"here": local, "record": record, "cancelled": True}
         if operation == "activate":
             source = validate_record(request["source"], anchor)
             expected = validate_record(request["expected"], anchor)
@@ -869,6 +1023,7 @@ def peer(anchor, operation):
                 or source["harbor"] != expected["last_known_harbor"]
                 or source["vessel_id"] != expected["vessel_id"]
                 or source["options"] != expected["options"]
+                or source.get("handoff_id") != expected.get("handoff_id")
                 or expected.get("sailing_to") != local
             ):
                 fail("source did not acknowledge this arrival")
@@ -1075,6 +1230,45 @@ def sail(anchor, source, expected):
         return incoming
 
 
+def cancel_source(anchor, record, local):
+    check_payload(anchor, record)
+    destination = record.get("sailing_to", record["last_known_harbor"])
+    reply = remote(anchor, destination, "cancel", {"source": record})
+    if reply["here"] != destination or reply.get("cancelled") is not True:
+        fail("destination did not acknowledge cancellation; source remains inactive")
+    record = {**record, "anchored": True, "last_known_harbor": local}
+    record.pop("sailing_to", None)
+    record.pop("handoff_id", None)
+    write_record(anchor, record)
+    return record
+
+
+def cancel_sail(anchor, expected):
+    local = here()
+    with anchor_lock(anchor):
+        record = read_record(anchor)
+        if {**record_configuration(record), "anchored": True} != expected:
+            fail("this vessel is not local with these directory options")
+        if record["anchored"]:
+            return record
+        if record.get("sailing_to") != local:
+            return cancel_source(anchor, record, local)
+    # The source must be able to lock this receiving harbor while revoking it.
+    reply = remote(
+        anchor, record["last_known_harbor"], "cancel-source", {"arrival": record}
+    )
+    source = reply["record"]
+    if (
+        source is None
+        or not source["anchored"]
+        or source["harbor"] != record["last_known_harbor"]
+        or source["vessel_id"] != record["vessel_id"]
+        or source["options"] != record["options"]
+    ):
+        fail("source did not acknowledge cancellation")
+    return source
+
+
 def require_separate_terminal(record):
     pid = session_pid(record)
     if pid.isdigit() and int(pid) in ancestors(os.getpid()):
@@ -1129,6 +1323,7 @@ def scuttle(anchor, expected):
                 os.close(fd)
             shutil.rmtree(vessel)
         vessel_path(anchor, ".json").unlink(missing_ok=True)
+        vessel_path(anchor, ".init.json").unlink(missing_ok=True)
         # Last mutation under this lock; stale openers must reject its old inode.
         vessel_path(anchor, ".lock").unlink()
     return {"scuttled": True}
@@ -1170,6 +1365,7 @@ def push(anchor, target, expected):
             known_harbors(candidate) if candidate else [],
             [host, destination],
         )
+        record["handoff_id"] = str(uuid.uuid4())
         record["known_harbors"] = known
         write_record(anchor, record)
         incoming = remote(
@@ -1186,7 +1382,9 @@ def push(anchor, target, expected):
             fail("destination did not reserve this arrival; no source work was stopped")
         deadline = time.monotonic() + 60
         while True:
-            stopped = prepare_source(anchor, record, destination, known)
+            stopped = prepare_source(
+                anchor, record, destination, known, record["handoff_id"]
+            )
             record = stopped["record"]
             if stopped["stopped"]:
                 break
@@ -1242,17 +1440,29 @@ def main():
             "scuttle",
             "_peer",
             "_projects",
+            "_route",
             "list",
         ),
     )
     parser.add_argument("--anchor", required=True)
     parser.add_argument("--vessel", default="flagship")
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--agent")
     direction = parser.add_mutually_exclusive_group()
     direction.add_argument("--from", dest="source")
     direction.add_argument("--to", dest="target")
+    direction.add_argument("--cancel", action="store_true")
     parser.add_argument(
-        "--op", choices=("inspect", "prepare", "commit", "receive", "activate")
+        "--op",
+        choices=(
+            "inspect",
+            "prepare",
+            "commit",
+            "receive",
+            "activate",
+            "cancel",
+            "cancel-source",
+        ),
     )
     args = parser.parse_args()
     global VESSEL_NAME
@@ -1264,6 +1474,11 @@ def main():
     if args.operation == "scuttle" and not args.confirm:
         parser.error("scuttle requires --confirm to discard all local vessel work")
     anchor = anchor_path(args.anchor)
+    pending = vessel_path(anchor, ".init.json")
+    if pending.is_symlink():
+        fail("initialization reservation must not be a symlink")
+    if pending.exists() and args.operation not in ("init", "scuttle", "list"):
+        fail("initialization is unfinished; retry open or init")
     if args.operation == "list":
         names = []
         namespace = anchor / ".firstmate"
@@ -1282,12 +1497,34 @@ def main():
             )
         )
         return
-    if args.operation in ("stop", "status"):
+    if args.operation in ("stop", "status", "_route"):
         expected = validate_configuration(json.load(sys.stdin), anchor)
         record = read_record(anchor)
         if record["harbor"] != here() or record["options"] != expected["options"]:
             fail("this vessel is not local with these directory options")
-        if args.operation == "status":
+        if args.operation == "_route":
+            if not record["anchored"] and "sailing_to" not in record:
+                try:
+                    reply = remote(anchor, record["last_known_harbor"], "inspect")
+                    arrival = reply["record"]
+                    if (
+                        arrival is not None
+                        and arrival.get("sailing_to") == reply["here"]
+                        and arrival["last_known_harbor"] == record["harbor"]
+                        and arrival["vessel_id"] == record["vessel_id"]
+                        and arrival.get("handoff_id") == record.get("handoff_id")
+                    ):
+                        record = {**record, "sailing_to": reply["here"]}
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    subprocess.CalledProcessError,
+                ):
+                    pass  # Ordinary sailing still owns fallback discovery and its diagnostics.
+            print(json.dumps(record))
+        elif args.operation == "status":
             print(
                 json.dumps(
                     {"record": record, "processes": vessel_processes(anchor, record)}
@@ -1304,24 +1541,23 @@ def main():
         return
     if args.operation == "sail":
         expected = validate_configuration(json.load(sys.stdin), anchor)
-        record = (
-            push(anchor, args.target, expected)
-            if args.target
-            else sail(anchor, args.source, expected)
-        )
+        if args.cancel:
+            record = cancel_sail(anchor, expected)
+        else:
+            record = (
+                push(anchor, args.target, expected)
+                if args.target
+                else sail(anchor, args.source, expected)
+            )
     elif args.operation == "_peer":
         print(json.dumps(peer(anchor, args.op)))
         return
     else:
         expected = validate_configuration(json.load(sys.stdin), anchor)
         if args.operation == "init":
-            record = {
-                **expected,
-                "vessel_id": str(uuid.uuid4()),
-                "last_known_harbor": expected["harbor"],
-                "known_harbors": [expected["harbor"]],
-            }
-            write_record(anchor, record)
+            if not args.agent or not re.fullmatch(r"[a-z][a-z0-9-]*", args.agent):
+                fail("initialization requires a valid --agent")
+            record = initialize(anchor, expected, args.agent)
         else:
             record = read_record(anchor)
             if record_configuration(record) != expected:
