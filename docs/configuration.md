@@ -11,10 +11,11 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -821,15 +822,52 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Park on review
+
+The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
+`config/auto-land` opts into merge-time cleanup of unparked ship lanes.
+Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
+Both flags are home-local and not inherited by secondmate homes.
+The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
+
 ## PR registration scan (config/pr-register-scan)
 
 The optional local, gitignored `config/pr-register-scan` presence flag opts this home into recording, without the supervisor, each PR a task reports.
 With the flag present, the watcher's check sweep runs `bin/fm-pr-check.sh scan` before the merge polls.
-The scan reads each ship task's newest `done:` line that names a `PR <url>`, and records that PR through the ordinary registration path when the task has no `pr=`, or has that same `pr=` but no published merge poll.
-It skips persistent secondmate and scout records, a `pr=` that names another PR, and a PR whose merge was already reported or whose poll was retired.
-A refused registration, such as a draft, prints one `check: pr-register:` wake for each task and PR, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
+The scan reads a ship task's PR only from a ready report: the task's newest crew-declared status line must be a `done:` line that is exactly `PR <url>`, `PR <url> checks green`, or `PR <url> published for review`, so prose around the URL and any later crew line report nothing.
+Later `resolved:` and `captain-held:` lines are supervisor bookkeeping and do not withdraw a ready report.
+It records that PR through the ordinary registration path when the task has no `pr=`, or has that same `pr=` but no published merge poll.
+When the status log named the recorded `pr=` and the ready report names a different PR, that PR replaces the recorded one, so a lane that closes a PR and opens another moves its merge poll.
+The flag also covers the PR a secondmate home's parent-channel report carries for a child's ready report (`bin/fm-inactive-reconcile.sh`): with it present, that report applies the same ready-report spellings, accepts any recognized forge URL, and lets the same replacement override the recorded `pr=`, while with it absent a recorded `pr=` always stands and only a GitHub-shaped `PR <url>` or `PR <url> checks green` line fills in a missing one.
+It skips persistent secondmate and scout records, a `pr=` the status log never named because that is the supervisor's own choice, and a PR whose merge was already reported or whose poll was retired.
+A refused registration, such as a draft, or one cut at the scan's time bound, which reports that the PR merge watch could not be armed, queues one `check: pr-register:` wake for each task, PR and reason before marking it sent, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
+
+## Degraded PR watch (config/pr-degraded-watch)
+
+The optional local, gitignored `config/pr-degraded-watch` presence flag opts this home into waking once when a ready PR or MR degrades, including a GitHub failing check, a GitLab failed pipeline, or a merge-train drop.
+With the flag present, registration records a degraded/train baseline and each poll checks those states; repeated reports of the same transition remain silent.
+Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
+The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
+
+## Treehouse pool report (config/treehouse-pool-report)
+
+The optional local, gitignored `config/treehouse-pool-report` presence flag opts this home into a read-only Treehouse pool hygiene report at bootstrap.
+With the flag present and the Treehouse state directory and `jq` available, bootstrap prints `TREEHOUSE_POOL_REPORT:` findings for pools with unavailable project paths, unowned slots older than `FM_POOL_ORPHAN_DAYS`, duplicate-origin project clones, and `project-*` or `scratch-project-*` pools without an active owner or lease; the `treehouse` executable is not required.
+The report never changes a pool or slot; pruning or other pool cleanup remains an explicit operator action.
+With the file absent, bootstrap reads no Treehouse state and prints no pool report.
+Only the file's presence is read, at each bootstrap run.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Squash commit summary (config/pr-squash-summary)
+
+The optional local, gitignored `config/pr-squash-summary` presence flag opts this home into writing the commit text of the GitHub squash merges `bin/fm-pr-merge.sh` performs.
+With the flag present, a squash merge whose caller passed no subject or body of its own uses the PR title plus ` (#N)` as the commit subject and the PR body's `## What Changed` section as the commit body, so the commit on the base branch describes the change rather than listing every branch commit.
+The section is copied verbatim up to the next level-two heading, which leaves out the operator intent before it and the no-mistakes appendix and attestation after it.
+A PR body without that section, a PR whose text cannot be read, a merge method other than squash, and GitLab and Forgejo merges keep the repository's own squash text.
+Only while the flag is present does it override the repository's own squash commit message setting; it is off by default, and with the file absent `bin/fm-pr-merge.sh` reads no PR text and sends the same merge command as before.
+The flag is a home-local preference, is not inherited by secondmate homes, and takes effect on the next merge.
 
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
@@ -930,6 +968,15 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Record hygiene report (config/record-hygiene)
+
+The optional local, gitignored `config/record-hygiene` presence flag opts this home into reporting its own inconsistent task records.
+Create it with `touch "$FM_HOME/config/record-hygiene"`; remove it to stop the report.
+With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the scan in the background and raises one `check: record hygiene:` notification when its findings change.
+It is off by default: without the flag, session start and the heartbeat print no report, move no files, and perform no record-hygiene reads.
+The flag takes effect at the next session start or heartbeat, and is a home-local preference that is not inherited by secondmate homes.
+[`architecture.md`](architecture.md#task-status-archives) owns scan scope and status-log archiving; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
 
 ## Record export (config/record-export-root)
 
@@ -1054,6 +1101,29 @@ With the flag absent the wedge timer spends no read for it and keeps the unchang
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and `bin/fm-classify-lib.sh`'s `status_worker_wait_verb` owns which lines count.
 
+## Superseded declared-wait wake (config/paused-wait-supersession)
+
+The optional local, gitignored `config/paused-wait-supersession` presence flag opts this home into a default-off check in the watcher's declared-wait handling.
+With it present, a pane whose worker's newest wait line is a `paused:` declaration is surfaced ahead of the `FM_PAUSE_RESURFACE_SECS` recheck cadence when its crew's own current state shows the wait no longer explains the quiet: the run is parked at a human-owed gate with no open `needs-decision` for that run, or the run is terminal.
+Each superseding state surfaces once per declaration and run on both the idle and busy paths, and repeats use the same bounded recheck cadence.
+It stays opt-in because it adds a wake reason that fires ahead of that cadence and spends a current-state read on each paused poll, so which lanes pay that read for earlier notice is a home's choice.
+
+With the flag absent the watcher spends no current-state read for it and keeps the unchanged declared-wait cadence and wording. The flag affects the foreground watcher only; away mode keeps today's declared-wait pause cadence.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+[`architecture.md`](architecture.md) owns the declared-wait contract and `bin/fm-watch.sh`'s `paused_wait_superseded` owns the exact derivation, reasons, and throttle.
+
+## Silent paused rechecks (config/paused-recheck-silent)
+
+The optional local, gitignored `config/paused-recheck-silent` presence flag opts this home into a default-off quiet form of the declared-wait recheck.
+With it present, the watcher's `FM_PAUSE_RESURFACE_SECS` recheck of a worker's `paused:` declaration queues no wake when the declaration is unchanged since its first recheck wake, the agent is confirmed alive (a secondmate's liveness is never read), its declared `until` time is not yet due, and the task has no open decision.
+The watcher records the recheck in the declaration's existing throttle marker, so the recheck cadence is unchanged.
+A first sight, a changed status line, a due declared time, and an open decision still wake.
+Captain-held transfers are not affected.
+
+With the flag absent, every recheck wakes as before.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `handle_paused_stale` owns the exact condition.
+
 ## Open-decision reminders (config/open-decision-reminders)
 
 The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
@@ -1084,6 +1154,21 @@ The away-mode daemon has no such deferral of its own.
 With the flag absent the wedge timer spends no current-state read for it and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
+
+## Pause ceiling (config/pause-ceiling)
+
+The optional local, gitignored `config/pause-ceiling` presence flag opts this home into a default-off ceiling on declared `paused:` waits.
+With it present, a dated pause becomes overdue once more than `FM_PAUSE_RESURFACE_SECS` has passed since its `until` time.
+An undated pause becomes overdue once it is older than `FM_PAUSE_UNDATED_MAX_SECS` (default 86400 seconds), aged from its own `[at=]` stamp or, when the line has none, from the status file's last change.
+An overdue pause appends one stable `blocked [key=paused-overdue-<task>]` decision to the task's status log, asking the captain to decide or release the wait, and raises one stale wake in place of the pause recheck.
+It never enters the wedge escalation ladder and never interrupts, kills, or tears anything down.
+The decision then stays quiet through pane churn and through resolutions of other keys, and closes when the worker appends a status event other than another `blocked:` line or a repeat of the same pause, or when a `resolved` line closes that key.
+The watcher raises it, and under an away or quiet posture record the away-mode daemon raises it and reports it once.
+Teardown removes the task's `state/.paused-overdue-<task>` record.
+
+With the flag absent no pause is ever overdue, no such decision opens, and declared waits keep the unchanged `FM_PAUSE_RESURFACE_SECS` recheck cadence.
+The flag is a home-local supervision preference and is not inherited by secondmate homes.
+`bin/fm-classify-lib.sh`'s `status_pause_is_overdue` owns the thresholds, and `bin/fm-watch.sh`'s `pause_overdue_reconcile` and `bin/fm-supervise-daemon.sh`'s `reconcile_overdue_pause` own when the decision closes.
 
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
 
@@ -1212,6 +1297,26 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
+
+## Stow guard (config/stow-guard)
+
+`config/stow-guard` is an optional local, gitignored file that asks a Claude primary to run `/stow` while there is still room before context compaction.
+Without the file the session is unchanged.
+
+With the file present, the Claude Stop hook `bin/fm-stow-guard.sh` blocks one turn end and tells that session to run the existing `/stow` skill.
+It asks when the newest context reading in the transcript tail is at least `tokens` (default 300000), once per crossing, and again only after a later reading falls below two-thirds of that line.
+It also asks when the newest `/stow` it has seen is at least `hours` old (default 24), and then not again for an hour.
+That age ask is skipped when a `/stow` timestamp cannot be read.
+The stored state is what makes each ask once per crossing, so a continuation stop is handled like any other stop.
+A hook error does not block the turn, and the hook never compacts the session itself.
+It runs for a plain Claude primary checkout of this home.
+It stays silent in a crew worktree and in a marked secondmate home, because a Stop block there leaves the parent recording that mate as idle while it is still working.
+The file is per home and is not inherited.
+Blank lines and lines that start with `#` are ignored.
+Optional lines are `tokens=<n>` and `hours=<n>`.
+An unusable value keeps its default.
+Remove the file to turn the ask off.
+The script header owns the transcript read, the state file, and the block message.
 
 ## Self-update source (config/self-update-source)
 
@@ -1509,8 +1614,8 @@ Neither fallback is unrestricted execution, and Firstmate does not change vendor
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
-The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available.
-The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored.
+The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available, or to stop sending the schemas of tools a worker never calls with every model request.
+The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored by the launch (Claude name typos are the exception, see [Validation](#validation)).
 With no file, or a file with no entries, every launch on every runtime is unchanged.
 
 Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
@@ -1523,10 +1628,19 @@ It does not apply to a secondmate's own agent, which neither reads nor refuses o
 
 | Runtime | With a non-empty list |
 | --- | --- |
+| `claude` | Launches with `--disallowedTools '<names>'`, so each listed tool's schema is absent from every model request, not only denied at call time. An entry may also be an MCP server name such as `mcp__<server>`, which hides all of that server's tools. Applies to every ship and scout spawn and relaunch. |
 | `pi`, `pi-signed` | Hides listed tool names, MCP tools included, on every ship and scout spawn and relaunch. |
 | Every other runtime, and a raw launch command | The launch refuses with an error naming `config/crew-exclude-tools`, because that runtime has no verified way to hide tools. |
 
 A relaunch validates the list and the replacement runtime's support before stopping the running worker, so an exclusion-list refusal preserves the running agent.
+
+### Trimming Claude tool schemas
+
+Claude Code sends every enabled tool's schema with each model call, and a long-lived worker resends them on every turn.
+List a tool the workers do not use to remove its schema from that fixed cost, for example `Workflow` or the artifact tools; the measured examples are in `docs/verification/runtime-backends.md`.
+Claude Code can supply a built-in `Artifact` tool when the artifacts MCP server is disallowed, so hide both `mcp__<artifacts-server>` and `Artifact` to remove every artifact schema.
+Only a name that matches a tool present in the worker's session has any effect; [Validation](#validation) explains why Claude names go unchecked, so confirm the saving from a worker's first request or `/context`.
+The measured effect on a Claude Code 2.1.319 worker launch is recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md).
 
 ### Validation
 
@@ -1536,6 +1650,7 @@ An unreadable or nonregular file, or a path inspection error, also refuses and n
 For a new worker, these checks run before its endpoint, local copy, or task record is created; Firstmate never launches with a partial list.
 Only exact tool names are accepted, not wildcard patterns.
 Firstmate checks syntax and runtime support before launch but never runs `pi mcp list` or otherwise connects to servers to validate names.
+Claude workers get no post-launch name check, so a misspelled Claude entry is silently ineffective.
 When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
 The check runs before worker actions so it cannot supersede a terminal status emitted during the turn.
 An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.
@@ -1686,6 +1801,15 @@ When the file is absent, worker launches do not add a board address and retain t
 
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+
+## Lavish URL domain map (config/lavish-url-domains)
+
+The optional local, gitignored `config/lavish-url-domains` maps captured website hosts to registered projects for `/lavish-url` feedback routing.
+Each non-comment line is one `<domain>[:<port>] <project>` pair, and the named project must already be registered in `data/projects.md`.
+The map is home-local and is not inherited by secondmate homes.
+When the file is absent, routing falls back to registry entries that name the site, and treats a site only a project's own docs mention as unconfirmed evidence.
+A malformed line or an unregistered project is an error rather than a guess, and two projects sharing the deciding entry are reported as ambiguous.
+Snapshots and their metadata live under `<home>/.lavish/snapshots/`; `bin/fm-lavish-url.sh` owns the matching order, the snapshot record, and the routing output.
 
 ## Home brief include (config/brief-include.md)
 
@@ -2300,6 +2424,8 @@ An absent required tool with an automated install path reports `MISSING:` with i
 
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+
+With the opt-in [Treehouse pool report](#treehouse-pool-report-configtreehouse-pool-report), bootstrap also prints `TREEHOUSE_POOL_REPORT:` findings.
 
 **Project refresh at startup**
 
@@ -3433,7 +3559,7 @@ FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536
 FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the ledger's own last publication before session start reports a HOME_SUMMARY line; invalid or zero values use 2
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each local per-task current-state read inside bin/fm-fleet-snapshot.sh; remote endpoint liveness is not probed on the snapshot path
-FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations are collected concurrently during snapshot composition
+FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations, status-history fold, and row composition run concurrently during snapshot composition
 FM_SNAPSHOT_BUDGET=5                # one total seconds budget for all concurrent remote home-ledger reads
 FM_SNAPSHOT_CACHE_DIR=$FM_HOME/state/secondmate-summary-cache   # private parent-side cache of successfully fetched remote home ledgers
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=14  # floored elapsed-day threshold at which an undated captain hold (no hold-until; age from its UTC hold-set timestamp, falling back to since for legacy unstamped holds) is projected as a Charted Next gate instead of a live Captain's Call; 0 applies once the computed age is non-negative
@@ -3523,6 +3649,7 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stal
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn, explicit native-harness progress, or opted-in model progress (see the stream option above; bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, an attended backlog captain hold on the crew's task, or - where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it - the worker's own still-open newest `blocked:` or `needs-decision:` line or a validation gate of the crew's own awaiting the supervisor's still-unanswered decision, or - where config/wedge-defer-validating arms it - an attributed validation run that is running or fixing, takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_STREAM_SILENT_MAX_SECS=         # opt-in Pi worker foreground model-stream silence threshold; off by default; see the option above and bin/fm-busy-lib.sh
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog captain hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered supervisor-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a captain-held transfer or backlog captain hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
+FM_PAUSE_UNDATED_MAX_SECS=86400   # seconds before an undated worker pause becomes overdue where config/pause-ceiling arms the pause ceiling; zero or invalid values use 86400; see "Pause ceiling (config/pause-ceiling)" above
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery actions and refusal rules; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-driven relaunch's per-home lock wait and its spawn execution; a lock-wait timeout skips recovery without touching the endpoint or recording an attempt; zero or invalid values use 120
@@ -3543,6 +3670,7 @@ FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
+FM_POOL_ORPHAN_DAYS=30 # age in days before the opt-in Treehouse pool report flags an unowned slot; invalid values use 30
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-sync.sh hits the orphaned .git/packed-refs.lock signature
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
