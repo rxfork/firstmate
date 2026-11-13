@@ -16,6 +16,83 @@ configure() {
   export TMUX_TMPDIR="$FM_HOME/tmux" XDG_CACHE_HOME="$FM_HOME/cache"
 }
 
+opening_initializes_and_preserves_runtime_arguments() (
+  local anchor="$TMP_ROOT/open anchor" rc=0
+  mkdir -p "$anchor"
+  configure "$anchor" red
+  printf 'n\ny\n' | bash "$ANCHOR_CLI" open --anchor "$anchor" --vessel red --agent pi -- bash -c '
+    [ "$FM_VESSEL" = red ] && [ "$FM_HOME" = "$FM_ANCHOR/.firstmate/red" ] || exit 99
+    printf "%s\\0" "$@" > "$1"
+    exit 37
+  ' bash "$TMP_ROOT/open-argv" 'a model' '' 'literal ; argument' >"$TMP_ROOT/open-output" 2>"$TMP_ROOT/open-prompts" || rc=$?
+  [ "$rc" -eq 37 ] || fail 'opening changed the command exit status or omitted runtime paths'
+  printf '%s\0' "$TMP_ROOT/open-argv" 'a model' '' 'literal ; argument' > "$TMP_ROOT/open-expected"
+  cmp -s "$TMP_ROOT/open-argv" "$TMP_ROOT/open-expected" || fail 'opening changed runtime arguments'
+  [ ! -s "$TMP_ROOT/open-output" ] || fail 'opening wrote prompts or metadata to runtime stdout'
+  rg -q 'Anchor a new vessel named red' "$TMP_ROOT/open-prompts" || fail 'opening did not ask before initialization'
+  [ "$(< "$FM_HOME/no-mistakes/config.yaml")" = 'agent: "pi"' ] || fail 'opening did not initialize the selected agent'
+  bash "$ANCHOR_CLI" open --anchor "$anchor" --vessel red --agent pi -- touch "$TMP_ROOT/reopened" </dev/null >/dev/null || fail 'an existing local vessel needed another prompt'
+  [ -f "$TMP_ROOT/reopened" ] || fail 'reopening did not run the command'
+  pass 'opening initializes only with consent, exports runtime paths and preserves command argv and status'
+)
+
+opening_refusals_do_not_launch_or_adopt_state() (
+  local anchor="$TMP_ROOT/open refusals" input
+  mkdir -p "$anchor"
+  configure "$anchor"
+  for input in '' $'n\nn\n' $'y\n\n'; do
+    if printf '%s' "$input" | bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- touch "$TMP_ROOT/open-forbidden" >/dev/null 2>&1; then fail 'declined or incomplete opening started work'; fi
+    [ ! -e "$anchor/.firstmate" ] || fail 'declined or incomplete opening created state'
+  done
+  if bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- touch "$TMP_ROOT/open-forbidden" --vessel ../escape </dev/null >"$TMP_ROOT/open-eof" 2>&1; then fail 'EOF started work'; fi
+  rg -q 'Sail vessel flagship' "$TMP_ROOT/open-eof" || fail 'runtime arguments were parsed as launcher options'
+  for input in '--agent' '--agent pi' '--agent pi --'; do
+    # Deliberate word splitting supplies malformed argument lists.
+    # shellcheck disable=SC2086
+    if bash "$ANCHOR_CLI" open --anchor "$anchor" $input </dev/null >/dev/null 2>&1; then fail 'opening accepted an incomplete command'; fi
+  done
+  if bash "$ANCHOR_CLI" open --anchor "$anchor" --vessel ../escape --agent pi -- true </dev/null >/dev/null 2>&1; then fail 'opening accepted an unsafe vessel name'; fi
+  mkdir -p "$FM_HOME"
+  printf 'keep\n' > "$FM_HOME/work"
+  if printf 'n\ny\n' | bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- touch "$TMP_ROOT/open-forbidden" >/dev/null 2>&1; then fail 'opening adopted unregistered work'; fi
+  [ "$(< "$FM_HOME/work")" = keep ] && [ ! -e "$TMP_ROOT/open-forbidden" ] || fail 'refused opening changed work or launched its command'
+  pass 'opening preserves validation and refuses EOF, cancellation and unregistered work without launching'
+)
+
+opening_sails_new_and_registered_vessels() (
+  setup_harbors open-sailing
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  printf 'portable work\n' > "$FM_HOME/projects/work"
+  activate_harbor laptop
+  printf 'y\ndesktop\n' | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$FM_HOME/opened" >/dev/null || fail 'opening did not pull the requested vessel'
+  [ "$(< "$FM_HOME/projects/work")" = 'portable work' ] && [ -f "$FM_HOME/opened" ] || fail 'opening lost sailing data or did not start its command'
+  printf 'updated work\n' > "$FM_HOME/projects/work"
+  activate_harbor desktop
+  bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$FM_HOME/reopened" </dev/null >/dev/null || fail 'opening did not follow a registered vessel to its current harbor'
+  [ "$(< "$FM_HOME/projects/work")" = 'updated work' ] && [ -f "$FM_HOME/reopened" ] || fail 'opening ran before the latest vessel arrived'
+  activate_harbor third
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if printf 'y\ndesktop\n' | bash "$ANCHOR_CLI" open --anchor "$FM_ANCHOR" --agent pi -- touch "$TMP_ROOT/open-copy-forbidden" >/dev/null 2>&1; then fail 'opening ignored a failed copy'; fi
+  [ ! -e "$TMP_ROOT/open-copy-forbidden" ] || fail 'failed sailing started the command'
+  pass 'opening selects initialization or sailing in core and never launches after a failed transfer'
+)
+
+interactive_scuttling_requires_exact_confirmation() (
+  local anchor="$TMP_ROOT/interactive scuttle" answer
+  mkdir -p "$anchor"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  printf 'keep\n' > "$FM_HOME/work"
+  for answer in '' $'scuttle\n' $'no\n'; do
+    if printf '%s' "$answer" | bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --interactive >/dev/null 2>&1; then fail 'interactive scuttle accepted EOF or an incorrect confirmation'; fi
+    [ "$(< "$FM_HOME/work")" = keep ] || fail 'cancelled scuttle deleted work'
+  done
+  printf 'SCUTTLE\n' | bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --interactive >"$TMP_ROOT/interactive-result" 2>"$TMP_ROOT/interactive-warning"
+  rg -q 'ALL vessel repositories, uncommitted work and session history' "$TMP_ROOT/interactive-warning" || fail 'interactive scuttle hid the destructive scope'
+  [ ! -e "$FM_HOME" ] && [ ! -e "$anchor/.firstmate/flagship.json" ] || fail 'confirmed interactive scuttle left the vessel'
+  pass 'interactive scuttle warns and requires exact typed consent before the existing deletion path'
+)
+
 named_vessels_are_independent() (
   local anchor="$TMP_ROOT/names" writer
   mkdir -p "$anchor"
@@ -893,4 +970,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock
+fm_test_run opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock

@@ -3,10 +3,16 @@
 # Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME
 #        fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]
+#        fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]
 #        fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR]
 #        fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]
-#        fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] --confirm
+#        fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)
+# open prompts to initialize or sail an unregistered vessel, otherwise follows
+# its recorded harbor, then runs COMMAND through the ordinary run gate.
+# EOF or declined initialization never starts COMMAND. Prompts go to stderr.
+# scuttle --interactive requires typing SCUTTLE before the ordinary --confirm
+# path; noninteractive callers must still supply --confirm explicitly.
 # Sailing uses SSH/rsync at identical physical paths. Source preparation stops
 # known work and asks the source primary to resolve unfamiliar processes.
 # Host tooling/auth remain local. fm-vessel.py owns routing, stopping and the
@@ -29,7 +35,7 @@
 # deletion, not files that may share hardlinks with outside repositories.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] --confirm\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nScuttle irreversibly discards all local vessel work and history; --confirm is required.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR]\n       fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nOpen prompts to initialize or sail before running the supplied command.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -56,15 +62,23 @@ done
 set -- "${arguments[@]}"
 [[ "$vessel_name" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || fail 'invalid vessel name: use 1-64 lowercase letters, digits, underscores or hyphens'
 case "$mode" in
-  init)
-    if [ "$#" -ne 2 ] || [ "${1:-}" != --agent ] || [[ ! "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+  init|open)
+    if [ "${1:-}" != --agent ] || [[ ! "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]] ||
+      { [ "$mode" = init ] && [ "$#" -ne 2 ]; } ||
+      { [ "$mode" = open ] && { [ "$#" -lt 4 ] || [ "${3:-}" != -- ]; }; }; then
       usage >&2
       exit 2
     fi
     agent=$2
+    if [ "$mode" = open ]; then shift 3; fi
     ;;
   check|stop|status|list) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
-  scuttle) [ "$#" -eq 1 ] && [ "$1" = --confirm ] || { usage >&2; exit 2; } ;;
+  scuttle)
+    if [ "$#" -ne 1 ] || { [ "$1" != --confirm ] && [ "$1" != --interactive ]; }; then
+      usage >&2
+      exit 2
+    fi
+    ;;
   sail)
     if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || { [ "${1:-}" != --from ] && [ "${1:-}" != --to ]; } || [ -z "${2:-}" ]; }; then
       usage >&2
@@ -114,6 +128,37 @@ done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
 snapshot=$(jq -n "${args[@]}" '{version:2, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
+if [ "$mode" = open ]; then
+  target=(--anchor "$anchor" --vessel "$vessel_name")
+  if [ ! -e "$metadata" ]; then
+    printf 'Sail vessel %s here from another harbor? [y/N] ' "$vessel_name" >&2
+    IFS= read -r answer || exit 1
+    case "$answer" in
+      y|Y|yes|YES)
+        printf 'Source harbor: ' >&2
+        IFS= read -r source_harbor || exit 1
+        bash "${BASH_SOURCE[0]}" sail "${target[@]}" --from "$source_harbor" >/dev/null
+        ;;
+      *)
+        printf 'Anchor a new vessel named %s here? [Y/n] ' "$vessel_name" >&2
+        IFS= read -r answer || exit 1
+        case "$answer" in
+          ''|y|Y|yes|YES) bash "${BASH_SOURCE[0]}" init "${target[@]}" --agent "$agent" >/dev/null ;;
+          *) exit 1 ;;
+        esac
+        ;;
+    esac
+  else
+    bash "${BASH_SOURCE[0]}" sail "${target[@]}" >/dev/null
+  fi
+  exec bash "${BASH_SOURCE[0]}" run "${target[@]}" -- "$@"
+fi
+if [ "$mode" = scuttle ] && [ "$1" = --interactive ]; then
+  printf 'Permanently delete %s, its metadata, ALL vessel repositories, uncommitted work and session history?\nType SCUTTLE to confirm: ' "$vessel" >&2
+  IFS= read -r answer || exit 1
+  [ "$answer" = SCUTTLE ] || fail 'scuttle cancelled'
+  set -- --confirm
+fi
 if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
   printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" --vessel "$vessel_name" "$@"
   exit $?
