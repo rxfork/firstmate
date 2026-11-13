@@ -79,8 +79,6 @@ namespace="$anchor/.firstmate"
 vessel="$namespace/$vessel_name"
 metadata="$namespace/$vessel_name.json"
 lock="$namespace/$vessel_name.lock"
-[ ! -e "$anchor/.firstmate.json" ] && [ ! -L "$anchor/.firstmate.json" ] && \
-  [ ! -e "$anchor/.firstmate.lock" ] && [ ! -L "$anchor/.firstmate.lock" ] || fail 'old unnamed vessel layout exists; no automatic migration is performed'
 [ ! -L "$namespace" ] && [ ! -L "$vessel" ] && [ ! -L "$metadata" ] || fail 'vessel container, payload and metadata must not be symlinks'
 if [ "$mode" = list ]; then
   exec python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" list --anchor "$anchor" --vessel "$vessel_name"
@@ -114,7 +112,7 @@ for name in FM_HOME FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_PRO
   directories+=("$value")
 done
 [ "$(realpath -m -- "$FM_HOME")" = "$vessel" ] || fail 'FM_HOME must be the vessel directory'
-snapshot=$(jq -n "${args[@]}" '{version:1, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
+snapshot=$(jq -n "${args[@]}" '{version:2, anchored:true, anchor:$anchor, harbor:$harbor, backend:"tmux", options:($ARGS.named | del(.anchor,.harbor))}')
 umask 077
 if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
   printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" --vessel "$vessel_name" "$@"

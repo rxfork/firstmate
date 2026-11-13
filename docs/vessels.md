@@ -25,7 +25,6 @@ bash bin/fm-anchor.sh list --anchor /absolute/anchor
 
 `list` prints sorted, locally registered names, including inactive caches, without SSH, initialization or writes.
 New names can be selected without first appearing in that list.
-This is a fresh layout: old unnamed records and locks are refused without moving, adopting or deleting their data.
 Secondmates remain delegated supervisors, not independent vessels; this interface does not relocate their homes or rewrite remote routes.
 Only files within the selected payload are transported.
 
@@ -76,7 +75,6 @@ No manifests or host provisioning tools are required.
 Vessel workers require tmux and must use projects from the vessel's selected projects directory.
 New dispatch is refused while the vessel is reserved for sailing.
 Their working copies and common Git directories must remain inside the vessel, so Treehouse's Git pointers remain usable after sailing at the same physical path.
-This provisions fresh vessel repositories; it does not move or migrate existing host worktrees.
 
 ## Environment layers
 
@@ -114,7 +112,6 @@ Without `--to`, core tries the last-known harbor first, then known harbors, foll
 Those hints are not proof of presence: the peer must report its own anchored vessel and a usable payload.
 Conflicting discovered holders, mismatched identities and failed lookups stop rather than choosing arbitrarily or initializing a replacement.
 A local, already anchored vessel needs no SSH discovery; launching can still clone newly discovered projects.
-Existing local-only records remain readable without modification by `check` and `run`; explicit `sail` adds routing identity when necessary.
 
 The anchored harbor is authoritative; a registered unanchored local copy is disposable cache, not independent working state.
 Core incrementally mirrors the source into the same `.firstmate/NAME/` directory with rsync `--archive --delete --delete-excluded --partial`, updates the origin and enables the destination only after sync and acknowledgement succeed.
@@ -126,7 +123,7 @@ Vessel-local cache is retained because repositories can reference object storage
 Other persisted runtime records are left to ordinary Firstmate recovery; transfer does not resume worker processes.
 The origin retains its payload only as an unanchored cache; discovery never treats such a cache as an anchored source.
 A matching in-progress handoff can resume at its reserved destination, including recovery after a lost origin acknowledgement.
-The sibling record and lock, other anchor contents and saved copies from earlier versions are outside rsync's deletion scope.
+The sibling record and lock and other anchor contents are outside rsync's deletion scope.
 After interruption, retry `sail` at the destination; copy or origin-acknowledgement failure keeps that destination inactive and never falls through to initialization.
 If every reachable hint is stale, supply a known source explicitly with `--from` rather than guessing or creating a replacement.
 
@@ -184,7 +181,7 @@ bash bin/fm-anchor.sh scuttle --anchor /absolute/anchor --confirm
 
 Core stops local work first, waiting and retrying when the existing primary has been asked to finish cleanup.
 It refuses deletion if cleanup still cannot be confirmed; an accepted request is not treated as proof that work stopped.
-It removes only `<anchor>/.firstmate/NAME`, `NAME.json` and `NAME.lock`, not the `.firstmate/` container, other named vessels, outside repositories, other harbors or saved sibling archives.
+It removes only `<anchor>/.firstmate/NAME`, `NAME.json` and `NAME.lock`, not the `.firstmate/` container, other named vessels, outside repositories or other harbors.
 Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
 Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.
 The coordination lock is removed last, and competing operations must reject an old unlinked lock inode.

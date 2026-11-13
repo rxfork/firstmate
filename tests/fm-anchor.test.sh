@@ -50,7 +50,7 @@ named_vessels_are_independent() (
   cmp -s "$TMP_ROOT/redder-record" "$anchor/.firstmate/redder.json" || fail 'red operation changed redder'
   [ ! -e "$FM_HOME" ] && [ ! -e "$anchor/.firstmate/red.json" ] && [ ! -e "$anchor/.firstmate/red.lock" ] || fail 'red scuttle left its files'
   [ "$(bash "$ANCHOR_CLI" list --anchor "$anchor")" = $'flagship\nredder' ] || fail 'scuttle changed sibling registration'
-  [ -d "$anchor/.firstmate" ] && [ ! -e "$anchor/.firstmate.json" ] && [ ! -e "$anchor/.firstmate.lock" ] || fail 'named layout created top-level records or removed its container'
+  [ -d "$anchor/.firstmate" ] || fail 'scuttle removed the vessel container'
   kill "$writer"
   wait "$writer" 2>/dev/null || true
   trap - EXIT
@@ -69,16 +69,12 @@ vessel_names_and_layout_are_validated() (
   ln -s "$TMP_ROOT" "$anchor/.firstmate"
   if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'container symlink was accepted'; fi
   rm "$anchor/.firstmate"
-  printf 'old record\n' > "$anchor/.firstmate.json"
-  if bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null 2>&1; then fail 'old layout was silently converted'; fi
-  [ "$(< "$anchor/.firstmate.json")" = 'old record' ] && [ ! -e "$anchor/.firstmate" ] || fail 'old layout was changed'
-  rm "$anchor/.firstmate.json"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi > "$TMP_ROOT/valid-flagship"
   configure "$anchor" red
   bash "$ANCHOR_CLI" init --anchor "$anchor" --vessel red --agent pi >/dev/null
   cp "$TMP_ROOT/valid-flagship" "$anchor/.firstmate/red.json"
   if bash "$ANCHOR_CLI" check --anchor "$anchor" --vessel red >/dev/null 2>&1; then fail 'record from another name was accepted'; fi
-  pass 'unsafe names, symlink containers, old layouts and cross-name records refuse without conversion'
+  pass 'unsafe names, symlink containers and cross-name records refuse'
 )
 
 named_vessels_sail_independently() (
@@ -143,10 +139,12 @@ boarding_gate_never_repairs_metadata() (
   mkdir -p "$anchor"
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi > "$TMP_ROOT/registered"
-  for mode in raised foreign multiple-records; do
+  for mode in raised foreign multiple-records missing-identity unsupported-schema; do
     case "$mode" in
       raised) jq '.anchored=false' "$TMP_ROOT/registered" > "$anchor/.firstmate/flagship.json" ;;
       foreign) jq '.harbor="another-harbor"' "$TMP_ROOT/registered" > "$anchor/.firstmate/flagship.json" ;;
+      missing-identity) jq 'del(.vessel_id)' "$TMP_ROOT/registered" > "$anchor/.firstmate/flagship.json" ;;
+      unsupported-schema) jq '.version=999' "$TMP_ROOT/registered" > "$anchor/.firstmate/flagship.json" ;;
       multiple-records) { jq '.anchored=false' "$TMP_ROOT/registered"; printf '%s\n' "$(< "$TMP_ROOT/registered")"; } > "$anchor/.firstmate/flagship.json" ;;
     esac
     cp "$anchor/.firstmate/flagship.json" "$TMP_ROOT/before"
@@ -157,7 +155,7 @@ boarding_gate_never_repairs_metadata() (
   pass 'the local startup gate refuses raised or foreign anchors without rewriting state'
 )
 
-options_and_existing_work_are_not_converted() (
+options_and_unregistered_work_are_preserved() (
   local anchor="$TMP_ROOT/options" existing="$TMP_ROOT/existing"
   mkdir -p "$anchor" "$existing/.firstmate/flagship"
   configure "$anchor"
@@ -737,9 +735,9 @@ sailing_follows_hints_and_syncs_inactive_cache() (
   [ "$(stat -c %i "$FM_HOME/projects/unchanged")" = "$unchanged_inode" ] || fail 'incremental sync rewrote an unchanged file'
   [ ! -e "$FM_HOME/projects/obsolete" ] || fail 'sync did not delete a file removed at the docked source'
   [ ! -e "$FM_HOME/tmux/socket" ] && [ ! -e "$FM_HOME/state/.lock" ] || fail 'sync retained excluded stale runtime files'
-  shopt -s nullglob
-  leftovers=("$FM_ANCHOR"/.firstmate.previous.* "$FM_ANCHOR"/.firstmate.sailing.*)
-  [ "${#leftovers[@]}" -eq 0 ] || fail 'sync created staging or archive copies'
+  shopt -s nullglob dotglob
+  leftovers=("$FM_ANCHOR"/.firstmate/*)
+  [ "${#leftovers[@]}" -eq 3 ] || fail 'sync created files outside the payload, record and lock'
   jq -e '(.known_harbors | sort) == ["desktop","laptop","third"] and .anchored' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'known harbors did not converge'
   pass 'sailing follows hints and incrementally mirrors the same inactive cache including deletions'
 )
@@ -829,21 +827,6 @@ sailing_refuses_source_changes_before_copy() (
   pass 'a changed source is rejected before copying or deactivating it'
 )
 
-legacy_local_anchors_can_sail_without_rewriting_preferences() (
-  setup_harbors legacy
-  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
-  printf 'agent: codex\n' > "$NM_HOME/config.yaml"
-  jq 'del(.vessel_id,.last_known_harbor,.known_harbors) | .version=1' "$FM_ANCHOR/.firstmate/flagship.json" > "$FM_FIXTURE_WORLD/legacy"
-  cp "$FM_FIXTURE_WORLD/legacy" "$FM_ANCHOR/.firstmate/flagship.json"
-  bash "$ANCHOR_CLI" check --anchor "$FM_ANCHOR" >/dev/null
-  cmp -s "$FM_ANCHOR/.firstmate/flagship.json" "$FM_FIXTURE_WORLD/legacy" || fail 'ordinary checking migrated a legacy record'
-  activate_harbor laptop
-  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null
-  jq -e '.version == 2 and (.vessel_id | length > 0)' "$FM_ANCHOR/.firstmate/flagship.json" >/dev/null || fail 'explicit sailing did not add routing identity'
-  [ "$(< "$NM_HOME/config.yaml")" = 'agent: codex' ] || fail 'sailing rewrote existing agent preferences'
-  pass 'existing local records upgrade only on explicit sailing and preserve tool preferences'
-)
-
 sailing_does_not_confuse_ssh_aliases_with_multiple_holders() (
   setup_harbors aliases
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
@@ -910,4 +893,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy legacy_local_anchors_can_sail_without_rewriting_preferences core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_existing_work_are_not_converted anchor_operations_use_one_regular_lock
+fm_test_run named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock

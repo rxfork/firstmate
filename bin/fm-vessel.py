@@ -4,12 +4,11 @@
 Sailing stops source work before copying at identical physical anchor paths.
 Host tools/authentication are not copied. Ordinary SSH configuration is used.
 
-Record owner: version 1 contains the original local anchor configuration;
-version 2 adds a stable vessel_id, last_known_harbor and known_harbors (SSH
-names). harbor still identifies the host owning this particular local record.
+Records contain a stable vessel_id, last_known_harbor and known_harbors (SSH
+names). harbor identifies the host owning this particular local record.
 Host components are lowercase and known_harbors is deduplicated; SSH user name
 case is preserved. check/run normalize in memory without rewriting; explicit
-sail persists canonical names and upgrades version 1.
+sail persists canonical names.
 
 Peer inspect reads a record and tests payload availability. prepare compares
 that exact record under the anchor lock, marks it inactive and reserves it for
@@ -53,7 +52,7 @@ and removes only .firstmate/NAME plus its sibling NAME.json and NAME.lock.
 Only directories gain owner permissions; hardlinked files are unlinked without
 changing outside Git objects. Directory symlinks are never followed. The lock
 is removed last, and lock users reject stale descriptors after inode replacement.
-No remote harbor, outside repository or saved sibling archive is removed.
+No remote harbor, outside repository or unrelated anchor content is removed.
 """
 
 import argparse
@@ -125,11 +124,6 @@ def anchor_path(value):
     anchor = Path(value).resolve(strict=True)
     if not anchor.is_dir():
         fail("anchor must be an existing directory")
-    if any(
-        path.exists() or path.is_symlink()
-        for path in (anchor / ".firstmate.json", anchor / ".firstmate.lock")
-    ):
-        fail("old unnamed vessel layout exists; no automatic migration is performed")
     for path in (
         anchor / ".firstmate",
         vessel_path(anchor),
@@ -140,17 +134,14 @@ def anchor_path(value):
     return anchor
 
 
-def validate_record(record, anchor, vessel_name=None):
-    if not isinstance(record, dict):
-        fail("invalid vessel record")
-    version = record.get("version")
-    fields = (
-        BASE_FIELDS if version == 1 else BASE_FIELDS | (ROUTE_FIELDS - {"sailing_to"})
-    )
-    if version == 2 and "sailing_to" in record:
-        fields |= {"sailing_to"}
-    if type(version) is not int or version not in (1, 2) or set(record) != fields:
-        fail("unsupported vessel record")
+def validate_configuration(record, anchor, vessel_name=None):
+    if (
+        not isinstance(record, dict)
+        or set(record) != BASE_FIELDS
+        or type(record.get("version")) is not int
+        or record["version"] != 2
+    ):
+        fail("invalid vessel configuration")
     if record["anchor"] != str(anchor) or type(record["anchored"]) is not bool:
         fail("anchor path differs; sailing requires identical physical paths")
     record["harbor"] = harbor_name(record["harbor"])
@@ -175,31 +166,44 @@ def validate_record(record, anchor, vessel_name=None):
     ):
         if record["options"][name] != str(directory):
             fail(f"{name} does not match the vessel layout")
-    if version == 2:
-        if (
-            not isinstance(record["vessel_id"], str)
-            or str(uuid.UUID(record["vessel_id"])) != record["vessel_id"]
-        ):
-            fail("invalid vessel identity")
-        record["last_known_harbor"] = harbor_name(record["last_known_harbor"])
-        known = record["known_harbors"]
-        if (
-            not isinstance(known, list)
-            or not known
-            or any(not isinstance(name, str) for name in known)
-        ):
-            fail("invalid known harbors")
-        known = list(dict.fromkeys(harbor_name(name) for name in known))
-        record["known_harbors"] = known
-        if not {
-            record["harbor"],
-            record["last_known_harbor"],
-        }.issubset(known):
-            fail("invalid known harbors")
-        if "sailing_to" in record:
-            record["sailing_to"] = harbor_name(record["sailing_to"])
-            if record["anchored"] or record["sailing_to"] not in known:
-                fail("invalid sailing destination")
+    return record
+
+
+def validate_record(record, anchor, vessel_name=None):
+    if not isinstance(record, dict):
+        fail("invalid vessel record")
+    fields = BASE_FIELDS | (ROUTE_FIELDS - {"sailing_to"})
+    if "sailing_to" in record:
+        fields |= {"sailing_to"}
+    if set(record) != fields:
+        fail("invalid vessel record")
+    record.update(
+        validate_configuration(record_configuration(record), anchor, vessel_name)
+    )
+    if (
+        not isinstance(record["vessel_id"], str)
+        or str(uuid.UUID(record["vessel_id"])) != record["vessel_id"]
+    ):
+        fail("invalid vessel identity")
+    record["last_known_harbor"] = harbor_name(record["last_known_harbor"])
+    known = record["known_harbors"]
+    if (
+        not isinstance(known, list)
+        or not known
+        or any(not isinstance(name, str) for name in known)
+    ):
+        fail("invalid known harbors")
+    known = list(dict.fromkeys(harbor_name(name) for name in known))
+    record["known_harbors"] = known
+    if not {
+        record["harbor"],
+        record["last_known_harbor"],
+    }.issubset(known):
+        fail("invalid known harbors")
+    if "sailing_to" in record:
+        record["sailing_to"] = harbor_name(record["sailing_to"])
+        if record["anchored"] or record["sailing_to"] not in known:
+            fail("invalid sailing destination")
     return record
 
 
@@ -211,23 +215,8 @@ def read_record(anchor, name=None):
         return validate_record(json.load(stream), anchor, name)
 
 
-def base_record(record):
-    return {
-        **{key: value for key, value in record.items() if key not in ROUTE_FIELDS},
-        "version": 1,
-    }
-
-
-def with_routing(record):
-    if record["version"] == 2:
-        return dict(record)
-    return {
-        **record,
-        "version": 2,
-        "vessel_id": str(uuid.uuid4()),
-        "last_known_harbor": record["harbor"],
-        "known_harbors": [record["harbor"]],
-    }
+def record_configuration(record):
+    return {key: value for key, value in record.items() if key not in ROUTE_FIELDS}
 
 
 def write_record(anchor, record):
@@ -276,7 +265,7 @@ def anchor_lock(anchor):
 
 
 def known_harbors(record):
-    return record.get("known_harbors", [record["harbor"]])
+    return record["known_harbors"]
 
 
 def merge_harbors(*groups):
@@ -717,15 +706,12 @@ def prepare_source(anchor, record, destination, known):
         fail("rsync is required on the source harbor")
     retry = not record["anchored"] and (
         record.get("sailing_to") == destination
-        or (
-            "sailing_to" not in record
-            and record.get("last_known_harbor") == destination
-        )
+        or ("sailing_to" not in record and record["last_known_harbor"] == destination)
     )
     if not record["anchored"] and not retry:
         fail("vessel is not available for this destination")
     check_payload(anchor, record)
-    record = with_routing(record)
+    record = dict(record)
     record.update(
         anchored=False,
         sailing_to=destination,
@@ -745,13 +731,13 @@ def commit_source(anchor, record, destination):
 
 
 def check_receiver(record, source, local):
-    if source["version"] != 2 or source["harbor"] == local:
+    if source["harbor"] == local:
         fail("receiving requires another harbor's identified vessel")
     if record is not None:
         if (
             record["harbor"] != local
             or record["anchored"]
-            or record.get("vessel_id") != source["vessel_id"]
+            or record["vessel_id"] != source["vessel_id"]
             or record["options"] != source["options"]
         ):
             fail("destination is anchored, unrelated or configured differently")
@@ -880,7 +866,7 @@ def peer(anchor, operation):
                 or "sailing_to" in source
                 or source["last_known_harbor"] != local
                 or source["harbor"] != expected["last_known_harbor"]
-                or source.get("vessel_id") != expected.get("vessel_id")
+                or source["vessel_id"] != expected["vessel_id"]
                 or source["options"] != expected["options"]
                 or expected.get("sailing_to") != local
             ):
@@ -916,10 +902,10 @@ def peer(anchor, operation):
 def locate(anchor, local, record, source):
     hints = merge_harbors(
         [source] if source else [],
-        [record.get("last_known_harbor", record["harbor"])] if record else [],
+        [record["last_known_harbor"]] if record else [],
         known_harbors(record) if record else [],
     )
-    identity = record.get("vessel_id") if record else None
+    identity = record["vessel_id"] if record else None
     seen = {local}
     found, retry = [], []
     owners = set()
@@ -950,16 +936,14 @@ def locate(anchor, local, record, source):
         candidate = reply["record"]
         if candidate is None or reply["here"] == local:
             continue
-        if identity and candidate.get("vessel_id") != identity:
-            continue
-        if record and record["version"] == 1 and base_record(candidate) != record:
+        if identity and candidate["vessel_id"] != identity:
             continue
         if not identity:
-            identity = candidate.get("vessel_id")
+            identity = candidate["vessel_id"]
         known = merge_harbors(known, known_harbors(candidate), [reply["here"]])
         hints = merge_harbors(
             hints,
-            [candidate.get("last_known_harbor", candidate["harbor"])],
+            [candidate["last_known_harbor"]],
             known_harbors(candidate),
             [candidate["sailing_to"]] if "sailing_to" in candidate else [],
         )
@@ -977,11 +961,11 @@ def locate(anchor, local, record, source):
             if index == 1:
                 return host, candidate, known
         elif candidate.get("sailing_to") == local or (
-            candidate.get("last_known_harbor") == local
+            candidate["last_known_harbor"] == local
             and "sailing_to" not in candidate
             and record is not None
             and record.get("sailing_to") == local
-            and record.get("last_known_harbor", record["harbor"]) == reply["here"]
+            and record["last_known_harbor"] == reply["here"]
         ):
             retry.append((host, candidate))
     choices = found or retry
@@ -1005,15 +989,14 @@ def sail(anchor, source, expected):
         ):
             fail("refusing to overwrite nonempty unregistered vessel state")
         if record and record["anchored"] and record["harbor"] == local:
-            if base_record(record) != expected:
+            if record_configuration(record) != expected:
                 fail(
                     "vessel is not anchored here with these options; metadata was not changed"
                 )
             check_payload(anchor, record)
-            upgraded = with_routing(record)
-            if upgraded != json.loads(vessel_path(anchor, ".json").read_text()):
-                write_record(anchor, upgraded)
-            return upgraded
+            if record != json.loads(vessel_path(anchor, ".json").read_text()):
+                write_record(anchor, record)
+            return record
         if record is None and source is None:
             fail("empty harbor; supply --from HARBOR or initialize explicitly")
         if not shutil.which("ssh") or not shutil.which("rsync"):
@@ -1056,9 +1039,7 @@ def sail(anchor, source, expected):
                 prepared[key] != origin[key]
                 for key in ("anchor", "harbor", "backend", "options")
             )
-            or (
-                origin.get("vessel_id") and prepared["vessel_id"] != origin["vessel_id"]
-            )
+            or prepared["vessel_id"] != origin["vessel_id"]
         ):
             fail("origin did not prepare this destination")
         incoming = {
@@ -1159,7 +1140,7 @@ def push(anchor, target, expected):
         fail("destination is this harbor")
     with anchor_lock(anchor):
         record = read_record(anchor)
-        configuration = {**base_record(record), "anchored": True}
+        configuration = {**record_configuration(record), "anchored": True}
         if configuration != expected:
             fail("this vessel does not belong to this harbor with these options")
         require_separate_terminal(record)
@@ -1170,14 +1151,13 @@ def push(anchor, target, expected):
         if destination == local:
             fail("destination is this harbor, including through an SSH alias")
         candidate = reply["record"]
-        record = with_routing(record)
         if candidate is not None and candidate["anchored"]:
             if (
                 not record["anchored"]
                 and "sailing_to" not in record
                 and record["last_known_harbor"] == destination
                 and candidate["harbor"] == destination
-                and candidate.get("vessel_id") == record["vessel_id"]
+                and candidate["vessel_id"] == record["vessel_id"]
                 and candidate["options"] == record["options"]
                 and reply.get("available") is True
             ):
@@ -1296,11 +1276,13 @@ def main():
         return
     if args.operation == "scuttle":
         print(
-            json.dumps(scuttle(anchor, validate_record(json.load(sys.stdin), anchor)))
+            json.dumps(
+                scuttle(anchor, validate_configuration(json.load(sys.stdin), anchor))
+            )
         )
         return
     if args.operation in ("stop", "status"):
-        expected = validate_record(json.load(sys.stdin), anchor)
+        expected = validate_configuration(json.load(sys.stdin), anchor)
         record = read_record(anchor)
         if record["harbor"] != here() or record["options"] != expected["options"]:
             fail("this vessel is not local with these directory options")
@@ -1320,7 +1302,7 @@ def main():
                     sys.exit(1)
         return
     if args.operation == "sail":
-        expected = validate_record(json.load(sys.stdin), anchor)
+        expected = validate_configuration(json.load(sys.stdin), anchor)
         record = (
             push(anchor, args.target, expected)
             if args.target
@@ -1330,13 +1312,18 @@ def main():
         print(json.dumps(peer(anchor, args.op)))
         return
     else:
-        expected = validate_record(json.load(sys.stdin), anchor)
+        expected = validate_configuration(json.load(sys.stdin), anchor)
         if args.operation == "init":
-            record = with_routing(expected)
+            record = {
+                **expected,
+                "vessel_id": str(uuid.uuid4()),
+                "last_known_harbor": expected["harbor"],
+                "known_harbors": [expected["harbor"]],
+            }
             write_record(anchor, record)
         else:
             record = read_record(anchor)
-            if base_record(record) != expected:
+            if record_configuration(record) != expected:
                 fail(
                     "vessel is not anchored here with these options; metadata was not changed"
                 )
