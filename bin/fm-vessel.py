@@ -784,6 +784,7 @@ def rsync_payload(anchor, record, source, destination):
     subprocess.run(
         [
             "rsync",
+            "--progress",
             "--archive",
             "--delete",
             "--delete-excluded",
