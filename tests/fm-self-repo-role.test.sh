@@ -715,7 +715,33 @@ test_secondmate_spawn_refuses_consent_flag() {
   pass "fm-spawn.sh: --upstream-consent is refused on secondmate charters"
 }
 
+test_archive_install_skips_self_repo_gate() {
+  local archive home project out rc
+  archive="$TMP_ROOT/archive-code"
+  home=$(make_role_home archive-home)
+  project=$(make_lineage_root archive-project https://github.com/example/bridge)
+  mkdir -p "$archive"
+  cp -R "$ROOT/bin" "$archive/bin"
+  out=$(check_as "$archive" "$home" "$project"); rc=$?
+  expect_code 2 "$rc" "an archive code root must skip the self-repository gate (got: $out)"
+  assert_equals "not a self-repository task" "$out" "archive installs must pass through"
+
+  out=$(FM_ROOT_OVERRIDE="$archive" FM_HOME="$home" \
+    "$archive/bin/fm-brief.sh" archive-bridge bridge --mode direct-PR --project "$project" 2>&1); rc=$?
+  expect_code 0 "$rc" "an archive install must prepare a publishing brief (got: $out)"
+  assert_present "$home/data/archive-bridge/brief.md" "publishing brief must exist"
+
+  # A Git checkout with unreadable history is not an archive installation.
+  git init -q "$archive" || fail "could not initialize empty code checkout"
+  out=$(check_as "$archive" "$home" "$project"); rc=$?
+  expect_code 1 "$rc" "a Git code root without history must still fail closed"
+  assert_contains "$out" "cannot determine" "the history failure must remain actionable"
+  pass "archive installs skip the gate, while Git installs retain fail-closed checks"
+}
+
 # --- run --------------------------------------------------------------------
+
+test_archive_install_skips_self_repo_gate
 
 test_report_default_and_local_grants
 test_report_fails_closed_on_unsafe_input

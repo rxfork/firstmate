@@ -35,9 +35,10 @@
 # code root by repository lineage, offline: a shared git common dir covers
 # linked worktrees and the code root itself, and a project holding a root commit
 # of the code root's history covers any fork, the parent, and any clone of
-# either. Lineage that cannot be determined (no code root history, or a shallow
-# side sharing no root) refuses rather than permits. The publication target is
-# compared only against a maintainer scope or task consent: the first remote
+# either. Archive installations outside Git skip this boundary. A Git checkout
+# with unreadable history, or a shallow side sharing no root, still refuses.
+# The publication target is compared only against a maintainer scope or task
+# consent: the first remote
 # whose remote.<name>.gh-resolved is base, otherwise the first remote named
 # upstream, github, or origin, reduced to lowercase host/owner/repo; a local-path remote
 # is resolved one hop through that repository's own origin, and left as
@@ -256,16 +257,17 @@ fm_role_shallow() {
 # fm_role_self_repo <project-dir> <code-root> - rc 0 when the task's project
 # shares firstmate's lineage: a shared git common dir (the code root itself or
 # a linked worktree of it), or a project holding a root commit of the code
-# root's history. rc 1 when the project is not a git repository or provably
-# shares no root. rc 2 when lineage cannot be determined: the code root has no
-# history, or either side is shallow and no root matched. Offline only; lazy
-# fetching of missing objects is disabled.
+# root's history. rc 1 when the code root is outside Git (archive install),
+# the project is not a git repository, or it provably shares no root. rc 2 when
+# a Git code root has no history, or either side is shallow and no root matched.
+# Offline only; lazy fetching of missing objects is disabled.
 fm_role_self_repo() {
   local proj=$1 root=$2 pa pb roots c
   pa=$(fm_role_git_common_dir "$proj")
   [ -n "$pa" ] || return 1
   pb=$(fm_role_git_common_dir "$root")
-  [ -n "$pb" ] && [ "$pa" = "$pb" ] && return 0
+  [ -n "$pb" ] || return 1 # Archive installs have no self-repository lineage.
+  [ "$pa" = "$pb" ] && return 0
   roots=$(git -C "$root" rev-list --max-parents=0 HEAD 2>/dev/null) || roots=
   [ -n "$roots" ] || return 2
   for c in $roots; do
