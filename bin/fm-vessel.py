@@ -28,11 +28,9 @@ Initialization reserves NAME.init.json before writing payload files and resumes
 that same identity after interruption. Host XDG paths are never redirected.
 There are no transfer receipts, leases, global registry or generic process manager.
 
-Stopping uses recorded workers' fm-control exit, the home-scoped watcher stop,
-and no-mistakes daemon stop without force. A verified vessel-local primary Pi
-receives SIGTERM through a pidfd; its owned children and private tmux server
-must finish before copy. Unfamiliar processes and refused stops are reported
-through the existing primary inbox, once per primary process generation.
+fm_raise_anchor.py owns shutdown and identity-bound signal confirmation for
+fm-raise-anchor.sh and sailing. Unfamiliar processes and refused stops are
+reported through the existing primary inbox, once per primary generation.
 Pull preparation releases its lock between destination retries, allowing the
 primary to finish cleanup. Sailing waits up to 60 seconds for coordination before
 refusing without a copy. The source remains reserved for the same retry.
@@ -42,8 +40,9 @@ paths, plus the recorded primary. This is not certification of every possible
 writer: unrelated protected processes are not inspected, and a daemon that
 clears its environment and leaves the vessel may not be attributable here.
 Known but unverified primary ownership or remaining processes prevent transfer.
-Only Pi is signalled directly; there is no name-pattern kill, force stop,
-teardown, worktree return, or cleanup of unlanded work.
+Remaining scoped processes may receive SIGTERM or SIGKILL only after terminal
+confirmation; there is no name-pattern kill, teardown, worktree return or
+cleanup of unlanded work.
 
 --to initiates an outbound-only push from a separate source terminal, holding
 its anchor lock through handoff. receive reserves an inactive destination
@@ -63,14 +62,11 @@ No remote harbor, outside repository or unrelated anchor content is removed.
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 import re
-import select
 import shlex
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -79,6 +75,14 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from fm_raise_anchor import (
+    ancestors,
+    session_pid,
+    stop_vessel,
+    vessel_processes,
+    with_stop_confirmation,
+)
 
 BASE_FIELDS = {"version", "anchored", "anchor", "harbor", "backend", "options"}
 ROUTE_FIELDS = {
@@ -538,265 +542,7 @@ def remote(anchor, host, operation, request=None):
     return reply
 
 
-def process_info(pid):
-    text = (Path("/proc") / str(pid) / "stat").read_text(errors="replace")
-    name, _, tail = text.rpartition(") ")
-    fields = tail.split()
-    return {
-        "pid": int(pid),
-        "name": name.partition("(")[2],
-        "state": fields[0],
-        "ppid": int(fields[1]),
-        "start": fields[19],
-    }
-
-
-def ancestors(pid):
-    result = set()
-    while pid > 0 and pid not in result:
-        result.add(pid)
-        try:
-            pid = process_info(pid)["ppid"]
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            break
-    return result
-
-
-def session_pid(record):
-    lock = Path(record["options"]["FM_STATE_OVERRIDE"]) / ".lock"
-    if not lock.exists():
-        return ""
-    if lock.is_symlink() or not lock.is_file():
-        fail("primary session lock must be a regular file")
-    return lock.read_text().partition("\n")[0]
-
-
-def vessel_processes(anchor, record):
-    vessel = vessel_path(anchor)
-    actors = ancestors(os.getpid())
-    pid = session_pid(record)
-    if pid.isdigit():
-        actors.discard(int(pid))
-    result = []
-    for path in Path("/proc").iterdir():
-        if not path.name.isdigit() or int(path.name) in actors:
-            continue
-        try:
-            if path.stat().st_uid != os.getuid():
-                if path.name == pid:
-                    fail(
-                        "recorded primary belongs to another user; cannot verify shutdown"
-                    )
-                continue
-            info = process_info(int(path.name))
-            if info["state"] in ("Z", "X"):
-                continue
-            try:
-                cwd = os.readlink(path / "cwd")
-            except PermissionError:
-                cwd = ""
-            try:
-                environment = dict(
-                    entry.split(b"=", 1)
-                    for entry in (path / "environ").read_bytes().split(b"\0")
-                    if b"=" in entry
-                )
-            except PermissionError:
-                environment = {}
-            scoped = Path(cwd).is_relative_to(vessel) or any(
-                Path(os.fsdecode(environment.get(name.encode(), b""))).is_relative_to(
-                    vessel
-                )
-                for name in OPTION_NAMES
-            )
-            if scoped or path.name == pid:
-                result.append({**info, "cwd": cwd, "scoped": scoped})
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-    return result
-
-
-def primary_process(record, processes):
-    pid = session_pid(record)
-    for process in processes:
-        if str(process["pid"]) != pid or not process["scoped"]:
-            continue
-        # The session-lock owner also recognizes Pi's exact kernel process name.
-        if process["name"] == "pi":
-            return process
-        executable = shutil.which("pi")
-        if executable is None:
-            return None
-        arguments = (Path("/proc") / pid / "cmdline").read_bytes().split(b"\0")
-        if (Path("/proc") / pid / "exe").resolve() == Path(executable).resolve() or any(
-            value
-            and Path(os.fsdecode(value)).is_absolute()
-            and Path(os.fsdecode(value)).resolve() == Path(executable).resolve()
-            for value in arguments[:2]
-        ):
-            return process
-    return None
-
-
-def stop_vessel(anchor, record):
-    options = record["options"]
-    environment = {
-        **os.environ,
-        **options,
-        "FM_ANCHOR": str(anchor),
-        "FM_BACKEND": "tmux",
-    }
-    for name in ("TMUX", "TMUX_PANE", "FM_ROOT_OVERRIDE"):
-        environment.pop(name, None)
-    scripts = Path(__file__).resolve().parent
-    errors = []
-
-    def stop(command):
-        result = subprocess.run(
-            command, env=environment, stdout=sys.stderr, check=False
-        )
-        if result.returncode:
-            errors.append(
-                f"{Path(command[0]).name} refused to stop (exit {result.returncode})"
-            )
-
-    socket = Path(options["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
-    shells = set()
-    if socket.is_socket():
-        windows = subprocess.check_output(
-            [
-                "tmux",
-                "-S",
-                str(socket),
-                "list-windows",
-                "-a",
-                "-F",
-                "#{session_name}:#{window_name}",
-            ],
-            env=environment,
-            text=True,
-        ).splitlines()
-        for path in Path(options["FM_STATE_OVERRIDE"]).glob("*.meta"):
-            metadata = dict(
-                line.split("=", 1)
-                for line in path.read_text().splitlines()
-                if "=" in line
-            )
-            if metadata.get("window") in windows:
-                stop([str(scripts / "fm-control.sh"), path.stem, "exit"])
-        panes = subprocess.check_output(
-            [
-                "tmux",
-                "-S",
-                str(socket),
-                "list-panes",
-                "-a",
-                "-F",
-                "#{pid}\t#{pane_pid}\t#{pane_current_command}",
-            ],
-            env=environment,
-            text=True,
-        ).splitlines()
-        for pane in panes:
-            server, pid, command = pane.split("\t")
-            shells.add(int(server))
-            if command in ("bash", "fish", "zsh", "sh", "dash"):
-                shells.add(int(pid))
-    if shutil.which("no-mistakes"):
-        stop(["no-mistakes", "daemon", "stop"])
-    processes = vessel_processes(anchor, record)
-    primary = primary_process(record, processes)
-    primary_actors = ancestors(primary["pid"]) if primary else set()
-    owned = {primary["pid"]} if primary else set()
-    for item in processes:
-        try:
-            arguments = (
-                (Path("/proc") / str(item["pid"]) / "cmdline").read_bytes().split(b"\0")
-            )
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        if any(
-            argument
-            in (
-                os.fsencode(scripts / "fm-watch.sh"),
-                os.fsencode(scripts / "fm-watch-arm.sh"),
-            )
-            for argument in arguments[:2]
-        ):
-            owned.add(item["pid"])
-    remaining = [
-        item
-        for item in processes
-        if item["pid"] not in shells | primary_actors
-        and not (ancestors(item["pid"]) & owned)
-    ]
-    requested = False
-    if remaining or errors:
-        if primary:
-            message = (
-                "A local vessel operation needs work to stop. "
-                "Stop the remaining vessel processes using their own stop commands; preserve "
-                "all repositories, worktrees, dirty files and durable task records. Do not "
-                "start new work or discard anything. Retrying the operation can request Pi shutdown "
-                "once the other work has stopped. Remaining processes: "
-                + json.dumps(remaining)
-                + "; stop errors: "
-                + json.dumps(errors)
-            )
-            generation = f"{record['harbor']}:{Path('/proc/sys/kernel/random/boot_id').read_text().strip()}:{primary['pid']}:{primary['start']}"
-            request_id = (
-                "vessel-stop-" + hashlib.sha256(generation.encode()).hexdigest()[:24]
-            )
-            result = subprocess.run(
-                [
-                    str(scripts / "fm-inbox.sh"),
-                    "note",
-                    "--request-id",
-                    request_id,
-                    "--",
-                    message,
-                ],
-                env=environment,
-                stdout=sys.stderr,
-                check=False,
-            )
-            requested = result.returncode == 0
-            if not requested:
-                errors.append(
-                    "could not notify the source primary; no transfer was started"
-                )
-    else:
-        if primary:
-            fd = os.pidfd_open(primary["pid"])
-            try:
-                if process_info(primary["pid"])["start"] != primary["start"]:
-                    fail("primary changed before shutdown; retry sailing")
-                signal.pidfd_send_signal(fd, signal.SIGTERM)
-                if not select.select([fd], [], [], 10)[0]:
-                    errors.append(
-                        "Pi did not finish graceful shutdown within 10 seconds"
-                    )
-            finally:
-                os.close(fd)
-        stop([str(scripts / "fm-watch-arm.sh"), "--stop"])
-        if socket.is_socket() and not errors:
-            stop(["tmux", "-S", str(socket), "kill-server"])
-        # Pi's sandbox wrapper can take a moment to finish its own cleanup.
-        deadline = time.monotonic() + 5
-        while True:
-            remaining = vessel_processes(anchor, record)
-            if not remaining or time.monotonic() >= deadline:
-                break
-            time.sleep(0.1)
-    return {
-        "stopped": not remaining and not errors,
-        "remaining": remaining,
-        "errors": errors,
-        "requested": requested,
-    }
-
-
-def prepare_source(anchor, record, destination, known, handoff_id=None):
+def prepare_source(anchor, record, destination, known, handoff_id=None, approved=None):
     if not shutil.which("rsync"):
         fail("rsync is required on the source harbor")
     retry = not record["anchored"] and (
@@ -815,7 +561,7 @@ def prepare_source(anchor, record, destination, known, handoff_id=None):
         known_harbors=merge_harbors(known_harbors(record), known, [destination]),
     )
     write_record(anchor, record)
-    return {"record": record, **stop_vessel(anchor, record)}
+    return {"record": record, **stop_vessel(anchor, record, approved)}
 
 
 def commit_source(anchor, record, destination):
@@ -1048,7 +794,13 @@ def peer(anchor, operation):
         if operation == "prepare":
             return {
                 "here": local,
-                **prepare_source(anchor, record, destination, request["known_harbors"]),
+                **prepare_source(
+                    anchor,
+                    record,
+                    destination,
+                    request["known_harbors"],
+                    approved=request.get("approved"),
+                ),
             }
         if operation == "commit":
             return {"here": local, "record": commit_source(anchor, record, destination)}
@@ -1164,14 +916,30 @@ def sail(anchor, source, expected):
         print(
             f"fm-anchor: stopping source work at {host} before sailing", file=sys.stderr
         )
-        deadline = time.monotonic() + 60
-        while True:
+
+        source_record = origin
+
+        def prepare(approved):
+            nonlocal source_record
             reply = remote(
                 anchor,
                 host,
                 "prepare",
-                {"expected": origin, "destination": local, "known_harbors": known},
+                {
+                    "expected": source_record,
+                    "destination": local,
+                    "known_harbors": known,
+                    "approved": approved,
+                },
             )
+            source_record = reply["record"]
+            return reply
+
+        deadline = time.monotonic() + 60
+        first = True
+        while True:
+            reply = with_stop_confirmation(prepare) if first else prepare(None)
+            first = False
             prepared = reply["record"]
             if reply.get("stopped") is True:
                 break
@@ -1284,8 +1052,16 @@ def scuttle(anchor, expected):
         )
         require_separate_terminal(record)
         deadline = time.monotonic() + 60
+        first = True
         while True:
-            stopped = stop_vessel(anchor, record)
+            stopped = (
+                with_stop_confirmation(
+                    lambda approved: stop_vessel(anchor, record, approved)
+                )
+                if first
+                else stop_vessel(anchor, record)
+            )
+            first = False
             if stopped["stopped"]:
                 break
             if not stopped["requested"] or time.monotonic() >= deadline:
@@ -1381,10 +1157,25 @@ def push(anchor, target, expected):
         if incoming != expected_incoming:
             fail("destination did not reserve this arrival; no source work was stopped")
         deadline = time.monotonic() + 60
+        first = True
         while True:
-            stopped = prepare_source(
-                anchor, record, destination, known, record["handoff_id"]
+            stopped = (
+                with_stop_confirmation(
+                    lambda approved, record=record: prepare_source(
+                        anchor,
+                        record,
+                        destination,
+                        known,
+                        handoff_id=record["handoff_id"],
+                        approved=approved,
+                    )
+                )
+                if first
+                else prepare_source(
+                    anchor, record, destination, known, handoff_id=record["handoff_id"]
+                )
             )
+            first = False
             record = stopped["record"]
             if stopped["stopped"]:
                 break
@@ -1534,7 +1325,10 @@ def main():
             with anchor_lock(anchor):
                 if record != read_record(anchor):
                     fail("vessel changed before stopping; retry")
-                result = stop_vessel(anchor, record)
+                require_separate_terminal(record)
+                result = with_stop_confirmation(
+                    lambda approved: stop_vessel(anchor, record, approved)
+                )
                 print(json.dumps(result))
                 if not result["stopped"]:
                     sys.exit(1)

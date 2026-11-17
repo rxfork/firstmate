@@ -29,7 +29,13 @@ Scuttle cases require explicit confirmation, remove read-only hook directories w
 A replaced-flock fixture verifies that a stale lock opener cannot initialize new state after the old inode is unlinked.
 An asynchronous cleanup case uses real processes and the durable inbox: scuttle waits after the request, then stops its registered primary and deletes only after the remaining work exits, without requiring a second confirmation.
 
-`python3 tests/fixtures/fm-vessel-stop-pi.py <scratch-directory> rpc` passed with real Pi 1.5.0, using an isolated session and no model prompt.
+Verified the shared raise-anchor shutdown on 2026-11-17 with `PATH=/usr/bin:/bin bash bin/fm-test-run.sh tests/fm-anchor.test.sh`.
+The anchor suite passed 54 cases (`1..54`, `FM_TEST_COMPLETE`, `exit=0`), including startup recovery, cancellation and transfer identity checks alongside shutdown confirmation.
+`tests/fm-vessel-stop-pi-live.test.sh` capability-skipped because PTY allocation was unavailable.
+The new confirmation cases simulate only terminal detection while executing the public CLI, real process inventories and real signals.
+They verify SIGTERM default yes, SIGKILL default no, explicit remote force-kill after SIGTERM resistance, refusal/EOF/noninteractive safety, stale process-identity rejection, unrelated-process isolation and retained vessel records and dirty files.
+
+`python3 tests/fixtures/fm-vessel-stop-pi.py <scratch-directory> rpc` passed on 2026-11-17 with real Pi 1.5.2, using an isolated session and no model prompt.
 The probe verified one durable source-agent request across retries, SIGTERM termination, retained session history and an unrelated process left running.
 Its RPC exit was 143; that is not proof that interactive shutdown hooks ran.
 `tests/fm-vessel-stop-pi-live.test.sh` is the token-free interactive guard; PTY allocation was unavailable in this verification environment, so interactive shutdown remains unverified here.

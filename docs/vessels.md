@@ -161,6 +161,7 @@ There is no offline queue, reverse SSH requirement, automatic remote installatio
 
 Each vessel's coordination lock serializes its core operations; pulling holds the destination lock and pushing holds the source lock through transfer.
 Source preparation reserves the vessel before stopping work, blocking new ordinary launches and worker dispatch.
+`bin/fm_raise_anchor.py` owns shutdown, shared by sailing and the standalone `bin/fm-raise-anchor.sh` tool.
 It uses the existing worker exit command, home-scoped watcher stop, validation-daemon stop without force and the vessel's private tmux server.
 An identified local primary Pi receives SIGTERM through a stable kernel process handle; its owned children must finish before copying.
 Working copies, uncommitted changes, leases and durable task records are preserved rather than torn down.
@@ -170,20 +171,25 @@ Core launches no replacement agent or one-shot model call; the existing agent ca
 Repeated requests to the same primary generation are deduplicated.
 Sailing retries source preparation for up to a minute while the notified agent works, then refuses if stopping is still unconfirmed.
 No copy begins on a stop refusal, and the reservation remains available for retry at that destination.
-Without a source primary, remaining work must be stopped through its own interface before retrying.
+A terminal caller can approve signaling the displayed remaining scoped processes, including when stopping a remote source.
+SIGTERM defaults to yes; after a bounded wait, SIGKILL requires a separate confirmation defaulting to no.
+Each approval is bound to the displayed PID and process start time, rechecked at the source before signaling through a stable kernel process handle.
+Declining, EOF or noninteractive input never grants consent, and remaining work still prevents copying.
+Force-killing can interrupt writes; use a service's own shutdown interface when available.
 
 ```sh
 # Read-only local record and scoped process inventory, including a pending source:
 bash bin/fm-anchor.sh status --anchor /absolute/anchor
 # Request local stopping without transferring or deleting working state:
-bash bin/fm-anchor.sh stop --anchor /absolute/anchor
+bash bin/fm-raise-anchor.sh --anchor /absolute/anchor
+# The existing fm-anchor.sh stop interface remains supported.
 ```
 
 The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
 This is not certification of every possible writer: a service that clears those references may not be attributable to the vessel.
-Unknown processes are reported, not killed by name, and an unverified recorded primary prevents transfer.
+Processes are never killed by name or process-group sweeps, and an unverified recorded primary prevents transfer.
 Firstmate's existing supervisor lock remains in force.
-There is no force-stop fallback, generic process manager or automatic cleanup of work.
+There is no automatic force-stop fallback, generic process manager or automatic cleanup of work.
 
 ## Scuttling a local vessel
 
@@ -201,7 +207,7 @@ It removes only `<anchor>/.firstmate/NAME`, `NAME.json`, any unfinished `NAME.in
 Read-only vessel directories gain owner permissions before deletion, and directory symlinks are not followed.
 Read-only files themselves need no chmod for unlinking; leaving their modes alone protects hardlinked Git objects shared with outside clones.
 The coordination lock is removed last, and competing operations must reject an old unlinked lock inode.
-There is no trash, backup or force-stop fallback.
+There is no trash, backup or automatic force-stop fallback.
 
 ## Verification
 

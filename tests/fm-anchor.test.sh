@@ -575,11 +575,61 @@ SH
   pass 'core exports portable defaults and appends forwarding names without losing caller additions'
 )
 
+raising_anchor_prompts_without_moving_or_deleting_work() (
+  python3 "$ROOT/tests/fixtures/fm-raise-anchor.py" "$TMP_ROOT/raising-anchor" || fail 'raise-anchor confirmation contract failed'
+  bash "$ROOT/bin/fm-raise-anchor.sh" --help | rg -q 'SIGTERM.*Y/n' || fail 'raise-anchor help omitted confirmation defaults'
+  pass 'raise-anchor defaults TERM yes and KILL no, preserves records and refuses unattended/declined stops'
+)
+
+sailing_confirms_remote_process_shutdown_before_copying() (
+  setup_harbors confirmed-stop
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  (cd "$FM_HOME/projects"; exec python3 -c 'import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path("ready").touch(); time.sleep(120)') &
+  local writer=$!
+  trap 'kill -KILL "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 200); do [ ! -e "$FM_HOME/projects/ready" ] || break; sleep 0.02; done
+  [ -e "$FM_HOME/projects/ready" ] || fail 'signal-resistant fixture did not start'
+  printf 'dirty work\n' > "$FM_PROJECTS_OVERRIDE/dirty"
+  activate_harbor laptop
+  if printf 'n\n' | python3 "$ROOT/tests/fixtures/fm-raise-anchor.py" "$FM_FIXTURE_WORLD/declined-terminal" \
+    bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/output" 2>"$FM_FIXTURE_WORLD/prompts"; then fail 'declined remote stop copied work'; fi
+  kill -0 "$writer" || fail 'declined remote stop killed work'
+  [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'declined remote stop started copying'
+  printf '\ny\n' | python3 "$ROOT/tests/fixtures/fm-raise-anchor.py" "$FM_FIXTURE_WORLD/terminal" \
+    bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/output" 2>"$FM_FIXTURE_WORLD/prompts" || fail 'confirmed remote stop did not sail'
+  wait "$writer" 2>/dev/null || true
+  trap - EXIT
+  if kill -0 "$writer" 2>/dev/null; then fail 'confirmed remote writer survived'; fi
+  rg -q "PID $writer" "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation did not identify the process'
+  rg -q 'SIGTERM.*\[Y/n\]' "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation lost the TERM default'
+  rg -q 'SIGKILL.*\[y/N\]' "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation lost the KILL default'
+  [ "$(< "$FM_PROJECTS_OVERRIDE/dirty")" = 'dirty work' ] || fail 'confirmed stopping discarded dirty work'
+  [ -s "$FM_FIXTURE_WORLD/copies" ] || fail 'confirmed remote stop did not copy'
+  pass 'sailing prompts locally and sends identity-bound approval to stop remote work before copying'
+)
+
+stale_process_approvals_never_signal_a_new_identity() (
+  setup_harbors stale-stop
+  bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >"$FM_FIXTURE_WORLD/record"
+  (cd "$FM_HOME/projects"; exec sleep 120) &
+  local writer=$!
+  trap 'kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
+  bash "$ANCHOR_CLI" status --anchor "$FM_ANCHOR" | jq --argjson pid "$writer" \
+    '[.processes[] | select(.pid == $pid) | .start = "stale-generation"]' >"$FM_FIXTURE_WORLD/approval"
+  jq -n --slurpfile record "$FM_FIXTURE_WORLD/record" --slurpfile processes "$FM_FIXTURE_WORLD/approval" \
+    '{expected:$record[0], destination:"laptop", known_harbors:["desktop","laptop"], approved:{signal:"SIGKILL", processes:$processes[0]}}' >"$FM_FIXTURE_WORLD/request"
+  if bash "$ANCHOR_CLI" _peer --anchor "$FM_ANCHOR" --vessel flagship --op prepare <"$FM_FIXTURE_WORLD/request" >"$FM_FIXTURE_WORLD/output" 2>"$FM_FIXTURE_WORLD/error"; then fail 'stale process identity was accepted'; fi
+  kill -0 "$writer" || fail 'stale process approval killed current work'
+  rg -q 'identity changed' "$FM_FIXTURE_WORLD/error" || fail 'stale approval refusal was hidden'
+  [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'stale approval copied work'
+  pass 'source rejects stale PID/start-time approvals without signaling or copying'
+)
+
 sailing_stops_registered_work_without_discarding_state() (
   setup_harbors known-work
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
   mkdir -p "$FM_FIXTURE_WORLD/source-core/bin" "$TMUX_TMPDIR/tmux-$(id -u)"
-  cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$FM_FIXTURE_WORLD/source-core/bin/"
+  cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$ROOT/bin/fm_raise_anchor.py" "$FM_FIXTURE_WORLD/source-core/bin/"
   for entry in 'fm-control.sh control' 'fm-watch-arm.sh watch'; do
     read -r name operation <<< "$entry"
     printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-harbors.py" %s "$@"\n' "$ROOT" "$operation" > "$FM_FIXTURE_WORLD/source-core/bin/$name"
@@ -1238,4 +1288,4 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock
+fm_test_run host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

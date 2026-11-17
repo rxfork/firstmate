@@ -42,4 +42,5 @@ Path.mkdir = mkdir
 os.link = link
 os.replace = replace
 sys.argv = sys.argv[1:]
+sys.path.insert(0, str(Path(sys.argv[0]).parent))
 runpy.run_path(sys.argv[0], run_name="__main__")
