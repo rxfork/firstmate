@@ -43,6 +43,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-github-https-lib.sh
+. "$SCRIPT_DIR/fm-github-https-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
@@ -375,14 +377,14 @@ normalize_origin_url() {
 
 source_origin_url() {
   local project=$1 mode=$2 src=$3 url
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  url=$(git -C "$src" config --get remote.origin.url 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
   normalize_origin_url "$src" "$url"
 }
 
 seeded_origin_url() {
   local project=$1 dst=$2 expected=$3 url
-  url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
+  url=$(git -C "$dst" config --get remote.origin.url 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: seeded project $project at $dst has no origin remote; expected $expected" >&2; return 1; }
   normalize_origin_url "$dst" "$url"
 }
@@ -495,7 +497,12 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
-  git clone --quiet "$url" "$dst"
+  if fm_git_url_is_github "$url"; then
+    fm_git_github_https_git clone --quiet "$url" "$dst" || return 1
+  else
+    git clone --quiet "$url" "$dst" || return 1
+  fi
+  fm_git_github_https_configure "$dst"
 }
 
 validate_seed_project() {
@@ -511,7 +518,7 @@ EOF
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
     return 1
   fi
-  url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
+  url=$(git -C "$src" config --get remote.origin.url 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
@@ -752,7 +759,7 @@ initialize_no_mistakes_project() {
     echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
     return 1
   }
-  ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
+  ( cd "$dst" && no-mistakes init && fm_git_github_https_configure "$dst" && no-mistakes doctor ) || {
     echo "error: failed to initialize no-mistakes for $project at $dst" >&2
     return 1
   }

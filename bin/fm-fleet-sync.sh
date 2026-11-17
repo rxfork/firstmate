@@ -22,8 +22,9 @@
 # that would have been touched.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# GitHub SSH origins fetch over HTTPS with the command-local gh credential helper,
-# leaving the configured remote and global Git configuration unchanged.
+# GitHub origins fetch over HTTPS with gh authentication. Repository-local
+# transport policy is repaired for later Git callers too; remote URLs and global
+# Git configuration stay unchanged.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -162,11 +163,11 @@ packed_refs_lock_path() {
   esac
 }
 
-# Fetch origin without mutating its URL or persistent Git configuration. GitHub
-# SSH origins use HTTPS plus the active gh credential for this command only;
-# other remotes keep Git's existing transport and authentication behavior.
+# Repair persistent policy too: later hooks and services do not inherit this
+# command's configuration. Other hosts retain their existing transport.
 fetch_origin() {
-  if fm_git_origin_is_github_ssh "$origin_url"; then
+  fm_git_github_https_configure "$PROJ" || return 1
+  if fm_git_url_is_github "$origin_url"; then
     fm_git_github_https_git -C "$PROJ" fetch origin --prune --quiet
   else
     git -C "$PROJ" fetch origin --prune --quiet

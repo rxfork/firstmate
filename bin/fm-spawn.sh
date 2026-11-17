@@ -4658,9 +4658,11 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+fm_git_github_https_configure "$PROJ_ABS" || exit 1
+
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_ORIGIN_URL=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null || true)
-  if fm_git_origin_is_github_ssh "$SPAWN_ORIGIN_URL"; then
+  SPAWN_ORIGIN_URL=$(git -C "$PROJ_ABS" config --get remote.origin.url 2>/dev/null || true)
+  if fm_git_url_is_github "$SPAWN_ORIGIN_URL"; then
     fm_git_github_https_require_auth || exit 1
     SPAWN_GITHUB_HTTPS=1
   fi

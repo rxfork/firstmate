@@ -88,10 +88,14 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
 
 ```sh
-(cd projects/<name> && no-mistakes init && no-mistakes doctor)
+bash bin/fm-github-https.sh projects/<name>
+(cd projects/<name> && no-mistakes init)
+bash bin/fm-github-https.sh projects/<name>
+(cd projects/<name> && no-mistakes doctor)
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
+`bin/fm-github-https.sh` owns repository-local transport setup and repair; run it again after replacing a review repository.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
 

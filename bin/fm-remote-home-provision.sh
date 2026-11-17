@@ -28,6 +28,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-github-https-lib.sh
+. "$SCRIPT_DIR/fm-github-https-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -249,14 +251,19 @@ EOF
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
       || die "project destination exists but is not a safe clone: $DEST"
-    EXISTING_ORIGIN=$(git -C "$DEST" remote get-url origin 2>/dev/null || true)
+    EXISTING_ORIGIN=$(git -C "$DEST" config --get remote.origin.url 2>/dev/null || true)
     [ "$EXISTING_ORIGIN" = "$ORIGIN" ] || die "project $NAME origin differs from the requested route"
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
-    git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    if fm_git_url_is_github "$ORIGIN"; then
+      fm_git_github_https_git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    else
+      git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    fi
+    fm_git_github_https_configure "$DEST" || die "could not configure GitHub transport for $NAME"
     if [ "$MODE" = no-mistakes ]; then
       command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
-      (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
+      (cd "$DEST" && no-mistakes init >/dev/null && fm_git_github_https_configure "$DEST" && no-mistakes doctor >/dev/null) \
         || die "no-mistakes initialization failed for project $NAME"
     fi
   fi

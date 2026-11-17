@@ -2503,7 +2503,7 @@ SH
   [ "$(wc -l < "$git_log")" -eq 3 ] || fail "freshening the acquired worktree should perform two fetches and one remote-head discovery"
   [ "$(grep -Fc 'credential.https://github.com.helper=!gh auth git-credential' "$git_log")" -eq 3 ] \
     || fail "not every post-acquisition origin contact used the gh credential helper"
-  [ "$(git -C "$PROJ_DIR" remote get-url origin)" = "$origin" ] \
+  [ "$(git -C "$PROJ_DIR" config --get remote.origin.url)" = "$origin" ] \
     || fail "GitHub HTTPS transport changed the configured origin"
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
   assert_not_contains "$launch" 'GIT_CONFIG_COUNT=4' \
@@ -2534,7 +2534,7 @@ SH
     "missing gh auth refusal did not rule out SSH fallback"
   [ ! -e "$FAKEBIN_DIR/.spawn-window" ] || fail "missing gh auth created an endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "missing gh auth delivered a worker launch"
-  [ "$(git -C "$PROJ_DIR" remote get-url origin)" = "$origin" ] \
+  [ "$(git -C "$PROJ_DIR" config --get remote.origin.url)" = "$origin" ] \
     || fail "missing gh auth changed the configured origin"
   pass "missing gh auth refuses before endpoint creation and never falls back to SSH"
 }

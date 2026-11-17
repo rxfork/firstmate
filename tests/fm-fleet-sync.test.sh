@@ -583,7 +583,7 @@ assert_github_ssh_transport() {
   advance_origin "$home" "$name" C1
   local_remote=$(git -C "$clone" remote get-url origin)
   git -C "$clone" remote set-url origin "$origin"
-  before_origin=$(git -C "$clone" remote get-url origin)
+  before_origin=$(git -C "$clone" config --get remote.origin.url)
   git_capture_fetch_transport "$fakebin"
   out="$home/out-$name"; err="$home/err-$name"
   record="$home/fetch-$name"; : > "$record"
@@ -604,24 +604,23 @@ assert_github_ssh_transport() {
     "$name: command did not rewrite scp-style GitHub SSH URLs"
   assert_contains "$record_text" "<url.https://github.com/.insteadOf=ssh://git@github.com/>" \
     "$name: command did not rewrite URL-style GitHub SSH URLs"
-  [ "$(git -C "$clone" remote get-url origin)" = "$before_origin" ] \
+  [ "$(git -C "$clone" config --get remote.origin.url)" = "$before_origin" ] \
     || fail "$name: origin changed during fetch"
-  if git -C "$clone" config --local --get-all credential.https://github.com.helper >/dev/null; then
-    fail "$name: credential helper persisted in local Git configuration"
-  fi
-  if git -C "$clone" config --local --get-all url.https://github.com/.insteadOf >/dev/null; then
-    fail "$name: URL rewrite persisted in local Git configuration"
-  fi
+  [ "$(git -C "$clone" config --local --get-all credential.https://github.com.helper)" = $'\n!gh auth git-credential' ] \
+    || fail "$name: persistent helper was not repaired"
+  [ "$(git -C "$clone" remote get-url origin)" = https://github.com/example/project.git ] \
+    || fail "$name: persistent rewrite was not repaired"
 }
 
 test_github_scp_ssh_origin_uses_command_local_gh_https() {
   assert_github_ssh_transport github-scp git@github.com:example/project.git
-  pass "scp-style GitHub SSH origin fetches through command-local gh HTTPS without mutation"
+  pass "scp-style GitHub SSH origin fetches through gh HTTPS and repairs local policy"
 }
 
 test_github_url_ssh_origin_uses_command_local_gh_https() {
+  assert_github_ssh_transport github-https https://github.com/example/project.git
   assert_github_ssh_transport github-url ssh://git@github.com/example/project.git
-  pass "URL-style GitHub SSH origin fetches through command-local gh HTTPS without mutation"
+  pass "URL-style GitHub SSH origin fetches through gh HTTPS and repairs local policy"
 }
 
 test_non_github_ssh_origin_keeps_existing_transport() {
@@ -649,7 +648,7 @@ test_non_github_ssh_origin_keeps_existing_transport() {
     "non-GitHub SSH origin received GitHub credentials"
   assert_not_contains "$record_text" "url.https://github.com/.insteadOf" \
     "non-GitHub SSH origin was rewritten to GitHub"
-  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+  [ "$(git -C "$clone" config --get remote.origin.url)" = "$origin" ] \
     || fail "non-GitHub SSH origin changed during fetch"
   pass "non-GitHub SSH origin keeps its existing transport and receives no GitHub credentials"
 }
@@ -675,7 +674,7 @@ test_github_gh_auth_failure_is_visible_without_fallback() {
   assert_contains "$(cat "$out")" "gh-fail: skipped: fetch failed: fatal: gh auth git-credential failed for github.com" \
     "gh authentication failure was not reported as the fetch failure"
   [ "$(wc -l < "$record")" -eq 1 ] || fail "gh authentication failure retried or fell back to another fetch"
-  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+  [ "$(git -C "$clone" config --get remote.origin.url)" = "$origin" ] \
     || fail "gh authentication failure changed origin"
   pass "gh authentication failure is visible and does not fall back to SSH"
 }
@@ -710,7 +709,7 @@ test_github_packed_refs_retry_keeps_command_local_gh_https() {
     || fail "not every packed-refs retry used the gh credential helper"
   [ "$(grep -Fc '<url.https://github.com/.insteadOf=git@github.com:>' "$record")" -eq 2 ] \
     || fail "not every packed-refs retry rewrote the GitHub SSH transport"
-  [ "$(git -C "$clone" remote get-url origin)" = "$origin" ] \
+  [ "$(git -C "$clone" config --get remote.origin.url)" = "$origin" ] \
     || fail "packed-refs retry changed origin"
   pass "every packed-refs retry keeps the same command-local gh HTTPS transport"
 }
