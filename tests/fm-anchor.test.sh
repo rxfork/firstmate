@@ -584,6 +584,13 @@ raising_anchor_prompts_without_moving_or_deleting_work() (
 sailing_confirms_remote_process_shutdown_before_copying() (
   setup_harbors confirmed-stop
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
+  cat > "$FM_FIXTURE_WORLD/fakebin/no-mistakes" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$NM_HOME/stop-calls"
+[ "$*" = 'daemon stop --force' ] || exit 77
+SH
+  chmod +x "$FM_FIXTURE_WORLD/fakebin/no-mistakes"
+  printf 'review history\n' > "$NM_HOME/preserved-review"
   (cd "$FM_HOME/projects"; exec python3 -c 'import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path("ready").touch(); time.sleep(120)') &
   local writer=$!
   trap 'kill -KILL "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
@@ -595,11 +602,14 @@ sailing_confirms_remote_process_shutdown_before_copying() (
     bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/output" 2>"$FM_FIXTURE_WORLD/prompts"; then fail 'declined remote stop copied work'; fi
   kill -0 "$writer" || fail 'declined remote stop killed work'
   [ ! -e "$FM_FIXTURE_WORLD/copies" ] || fail 'declined remote stop started copying'
-  printf '\ny\n' | python3 "$ROOT/tests/fixtures/fm-raise-anchor.py" "$FM_FIXTURE_WORLD/terminal" \
+  printf 'y\n\ny\n' | python3 "$ROOT/tests/fixtures/fm-raise-anchor.py" "$FM_FIXTURE_WORLD/terminal" \
     bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/output" 2>"$FM_FIXTURE_WORLD/prompts" || fail 'confirmed remote stop did not sail'
   wait "$writer" 2>/dev/null || true
   trap - EXIT
   if kill -0 "$writer" 2>/dev/null; then fail 'confirmed remote writer survived'; fi
+  rg -q 'Force-stop no-mistakes.*\[y/N\]' "$FM_FIXTURE_WORLD/prompts" || fail 'remote service refusal did not offer force-stop'
+  [ "$(< "$NM_HOME/preserved-review")" = 'review history' ] || fail 'force-stop deleted review history'
+  rg -q '^daemon stop --force$' "$NM_HOME/stop-calls" || fail 'remote force-stop did not use the supported command'
   rg -q "PID $writer" "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation did not identify the process'
   rg -q 'SIGTERM.*\[Y/n\]' "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation lost the TERM default'
   rg -q 'SIGKILL.*\[y/N\]' "$FM_FIXTURE_WORLD/prompts" || fail 'remote confirmation lost the KILL default'

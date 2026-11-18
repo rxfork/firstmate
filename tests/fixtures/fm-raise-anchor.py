@@ -156,3 +156,58 @@ assert result.returncode == 0 and json.loads(result.stdout)["stopped"], result.s
 print(
     "confirmed TERM defaults yes, KILL defaults no; refusal/EOF/non-TTY preserve work"
 )
+
+# A supported service stop, not PID signaling, must resolve service refusals.
+service_log = root / "service-calls"
+force_failure = root / "force-failure"
+services = root / "services"
+services.mkdir()
+service = services / "no-mistakes"
+service.write_text(
+    f"#!{real_python}\n"
+    "import pathlib, sys\n"
+    f"log = pathlib.Path({str(service_log)!r})\n"
+    "with log.open('a') as output: output.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    f"sys.exit(0 if sys.argv[1:] == ['daemon', 'stop', '--force'] and not pathlib.Path({str(force_failure)!r}).exists() else 1)\n"
+)
+service.chmod(0o755)
+# Both unattended and interactive calls see the same refusing service.
+environment["PATH"] = f"{services}:{environment['PATH']}"
+interactive["PATH"] = f"{services}:{interactive['PATH']}"
+review_record = Path(record["options"]["NM_HOME"]) / "preserved-review"
+review_record.parent.mkdir(parents=True, exist_ok=True)
+review_record.write_text("review history")
+for answers, tty, succeeds in (
+    ("y\n", False, False),
+    ("", True, False),
+    ("\n", True, False),
+    ("n\n", True, False),
+    ("y\n", True, True),
+):
+    service_log.unlink(missing_ok=True)
+    result = stop(answers, tty)
+    assert (result.returncode == 0) == succeeds, result.stderr + result.stdout
+    calls = service_log.read_text().splitlines()
+    assert ("daemon stop --force" in calls) == succeeds, calls
+    assert ("Force-stop no-mistakes" in result.stderr) == tty, result.stderr
+    assert review_record.read_text() == "review history"
+    assert json.loads((anchor / ".firstmate/flagship.json").read_text()) == record
+
+force_failure.touch()
+result = stop("y\n")
+assert result.returncode != 0 and json.loads(result.stdout)["errors"], result
+force_failure.unlink()
+
+process = worker(ignore_term=True)
+try:
+    service_log.unlink(missing_ok=True)
+    result = stop("y\n\ny\n")
+    assert result.returncode == 0, result.stderr + result.stdout
+    process.wait(timeout=2)
+    calls = service_log.read_text().splitlines()
+    assert calls == ["daemon stop", *["daemon stop --force"] * 3], calls
+finally:
+    if process.poll() is None:
+        process.kill()
+    process.wait()
+print("review force-stop is explicit, survives signal escalation, and preserves records")

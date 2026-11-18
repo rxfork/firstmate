@@ -130,7 +130,25 @@ def with_stop_confirmation(stop):
     if result["stopped"] or not interactive:
         return result
     confirmed = None
+    force_review_stop = False
     with os.fdopen(os.dup(3)) as terminal:
+        if result.get("review_stop_refused"):
+            print(
+                "no-mistakes refused to stop. Force-stopping may abandon active reviews; "
+                "repository files and review records will not be deleted.\n"
+                "Force-stop no-mistakes for this vessel? [y/N] ",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+            if terminal.readline().strip().lower() not in ("y", "yes"):
+                return result
+            force_review_stop = True
+            result = stop(
+                {"signal": "SIGTERM", "processes": [], "force_review_stop": True}
+            )
+            if result["stopped"] or result.get("review_stop_refused"):
+                return result
         for name, default in (("SIGTERM", True), ("SIGKILL", False)):
             processes = [
                 item
@@ -161,21 +179,29 @@ def with_stop_confirmation(stop):
             if answer not in ("y", "yes") and not (default and answer == ""):
                 break
             confirmed = {(item["pid"], item["start"]) for item in processes}
-            result = stop({"signal": name, "processes": processes})
+            approval = {"signal": name, "processes": processes}
+            if force_review_stop:
+                approval["force_review_stop"] = True
+            result = stop(approval)
             if result["stopped"]:
                 break
     return result
 
 
-def signal_processes(record, processes, approved):
-    """Signal only approved identities still in the current unmanaged inventory."""
+def validate_approval(approved):
     if (
         not isinstance(approved, dict)
-        or set(approved) != {"signal", "processes"}
+        or set(approved) - {"force_review_stop"} != {"signal", "processes"}
+        or ("force_review_stop" in approved and approved["force_review_stop"] is not True)
         or approved["signal"] not in ("SIGTERM", "SIGKILL")
         or not isinstance(approved["processes"], list)
     ):
         raise ValueError("invalid process stop approval")
+
+
+def signal_processes(record, processes, approved):
+    """Signal only approved identities still in the current unmanaged inventory."""
+    validate_approval(approved)
     current = {item["pid"]: item for item in processes}
     handles = []
     try:
@@ -214,6 +240,8 @@ def signal_processes(record, processes, approved):
 
 
 def stop_vessel(anchor, record, approved=None):
+    if approved is not None:
+        validate_approval(approved)
     options = record["options"]
     environment = {
         **os.environ,
@@ -277,8 +305,14 @@ def stop_vessel(anchor, record, approved=None):
             shells.add(int(server))
             if command in ("bash", "fish", "zsh", "sh", "dash"):
                 shells.add(int(pid))
+    review_stop_refused = False
     if shutil.which("no-mistakes"):
-        stop(["no-mistakes", "daemon", "stop"])
+        command = ["no-mistakes", "daemon", "stop"]
+        if approved is not None and approved.get("force_review_stop") is True:
+            command.append("--force")
+        previous_errors = len(errors)
+        stop(command)
+        review_stop_refused = len(errors) > previous_errors
     processes = vessel_processes(anchor, record)
     primary = primary_process(record, processes)
     primary_actors = ancestors(primary["pid"]) if primary else set()
@@ -374,4 +408,5 @@ def stop_vessel(anchor, record, approved=None):
         "remaining": remaining,
         "errors": errors,
         "requested": requested,
+        "review_stop_refused": review_stop_refused,
     }
