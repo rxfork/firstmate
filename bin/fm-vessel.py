@@ -1226,7 +1226,7 @@ def main():
             "init",
             "check",
             "sail",
-            "stop",
+            "fullstop",
             "status",
             "scuttle",
             "_peer",
@@ -1288,7 +1288,7 @@ def main():
             )
         )
         return
-    if args.operation in ("stop", "status", "_route"):
+    if args.operation in ("fullstop", "status", "_route"):
         expected = validate_configuration(json.load(sys.stdin), anchor)
         record = read_record(anchor)
         if record["harbor"] != here() or record["options"] != expected["options"]:

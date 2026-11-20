@@ -5,7 +5,7 @@
 #        fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]
 #        fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]
 #        fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]
-#        fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]
+#        fm-anchor.sh fullstop --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)
 # open prompts to initialize or sail an unregistered vessel, otherwise follows
@@ -45,7 +45,7 @@
 # deletion, not files that may share hardlinks with outside repositories.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]\n       fm-anchor.sh stop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nSail --cancel revokes an inactive destination before reopening the source; unavailable or active destinations refuse.\nInterrupted initialization resumes on open or init. Host XDG paths are unchanged.\nOpen prompts to initialize or sail before running the supplied command.\nStop is also available as fm-raise-anchor.sh; terminal escalation offers SIGTERM [Y/n], then SIGKILL [y/N].\nNoninteractive stopping refuses remaining processes without assuming consent.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]\n       fm-anchor.sh fullstop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nSail --cancel revokes an inactive destination before reopening the source; unavailable or active destinations refuse.\nInterrupted initialization resumes on open or init. Host XDG paths are unchanged.\nOpen prompts to initialize or sail before running the supplied command.\nFullstop is also available as fm-raise-anchor.sh; terminal escalation offers SIGTERM [Y/n], then SIGKILL [y/N].\nNoninteractive stopping refuses remaining processes without assuming consent.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -82,7 +82,7 @@ case "$mode" in
     agent=$2
     if [ "$mode" = open ]; then shift 3; fi
     ;;
-  check|stop|status|list) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
+  check|fullstop|status|list) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   scuttle)
     if [ "$#" -ne 1 ] || { [ "$1" != --confirm ] && [ "$1" != --interactive ]; }; then
       usage >&2
@@ -206,7 +206,7 @@ if [ "$mode" = scuttle ] && [ "$1" = --interactive ]; then
   [ "$answer" = SCUTTLE ] || fail 'scuttle cancelled'
   set -- --confirm
 fi
-if [ "$mode" = sail ] || [ "$mode" = stop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
+if [ "$mode" = sail ] || [ "$mode" = fullstop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
   # Preserve caller input separately from the JSON configuration pipe.
   exec 3<&0
   printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" --vessel "$vessel_name" "$@"

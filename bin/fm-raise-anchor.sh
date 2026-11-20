@@ -10,7 +10,7 @@
 # process groups. Repositories, dirty files and durable task records remain.
 # JSON on stdout reports stopped, remaining, errors and requested; a nonzero
 # exit means work is not confirmed stopped. Prompts/diagnostics go to stderr.
-# fm_raise_anchor.py owns shutdown shared with fm-anchor.sh sail/stop/scuttle.
+# fm_raise_anchor.py owns shutdown shared with fm-anchor.sh sail/fullstop/scuttle.
 set -eu
 case "${1:-}" in
   -h|--help)
@@ -18,4 +18,4 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-exec bash "$(dirname "${BASH_SOURCE[0]}")/fm-anchor.sh" stop "$@"
+exec bash "$(dirname "${BASH_SOURCE[0]}")/fm-anchor.sh" fullstop "$@"

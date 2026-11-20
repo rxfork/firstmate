@@ -380,7 +380,7 @@ named_vessels_are_independent() (
     [ "$PI_CODING_AGENT_SESSION_DIR" = "$FM_HOME/pi/sessions" ]
   ' || fail 'named launch exported another vessel configuration'
   bash "$ANCHOR_CLI" status --anchor "$anchor" --vessel red | jq -e --argjson pid "$writer" '.processes | all(.pid != $pid)' >/dev/null || fail 'a sibling vessel was counted as red work'
-  bash "$ANCHOR_CLI" stop --anchor "$anchor" --vessel red >/dev/null || fail 'stopping red was blocked by sibling work'
+  bash "$ANCHOR_CLI" fullstop --anchor "$anchor" --vessel red >/dev/null || fail 'stopping red was blocked by sibling work'
   bash "$ANCHOR_CLI" scuttle --anchor "$anchor" --vessel red --confirm >/dev/null || fail 'scuttle was blocked by a sibling lock or process'
   kill -0 "$writer" || fail 'stopping red killed sibling work'
   cmp -s "$TMP_ROOT/flagship-record" "$anchor/.firstmate/flagship.json" || fail 'red operation changed flagship'

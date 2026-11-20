@@ -190,7 +190,8 @@ Force-killing can interrupt writes; use a service's own shutdown interface when 
 bash bin/fm-anchor.sh status --anchor /absolute/anchor
 # Request local stopping without transferring or deleting working state:
 bash bin/fm-raise-anchor.sh --anchor /absolute/anchor
-# The existing fm-anchor.sh stop interface remains supported.
+# Or use the core fullstop command directly:
+bash bin/fm-anchor.sh fullstop --anchor /absolute/anchor
 ```
 
 The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
