@@ -818,6 +818,42 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+test_anchor_compute_context() {
+  local rec root home fakebin anchor out
+  rec=$(new_world anchor-compute)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  anchor="${root%/root}/anchor with spaces"
+  mkdir -p "$anchor/.firstmate/.agents"
+  printf '%s\n' 'Use the private compute provider.' > "$anchor/.firstmate/.agents/compute.md"
+
+  out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "$anchor/.firstmate/.agents/compute.md (private compute instructions)" "compute context path missing"
+  assert_contains "$out" 'Use the private compute provider.' "compute instructions were not loaded"
+
+  out=$(FM_ANCHOR="$anchor" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START" --reemit)
+  assert_contains "$out" 'Use the private compute provider.' "context re-emit dropped compute instructions"
+
+  out=$(FM_ANCHOR='' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'Use the private compute provider.' "non-vessel start discovered anchor context"
+
+  : > "$anchor/.firstmate/.agents/compute.md"
+  out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" '(present, empty)' "empty compute context was not distinguished"
+
+  rm "$anchor/.firstmate/.agents/compute.md"
+  out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "$anchor/.firstmate/.agents/compute.md (private compute instructions)" "optional missing compute context not labeled"
+
+  mkdir "$anchor/.firstmate/.agents/compute.md"
+  out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'UNREADABLE: expected a readable regular file' "invalid compute context silently ignored"
+  pass "anchor compute context loads on startup and re-emit without cwd discovery"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -3095,6 +3131,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_anchor_compute_context
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

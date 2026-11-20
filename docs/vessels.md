@@ -29,6 +29,14 @@ New names can be selected without first appearing in that list.
 Secondmates remain delegated supervisors, not independent vessels; this interface does not relocate their homes or rewrite remote routes.
 Only files within the selected payload are transported.
 
+### Private compute context
+
+Place private compute-provider instructions in `<anchor>/.firstmate/.agents/compute.md`.
+The shared session-start digest loads this optional file; `bin/fm-session-start.sh` owns loading and diagnostics.
+The file may be managed separately with chezmoi, but do not manage `.firstmate` as an exact directory that removes vessel data.
+It is anchor-local, not part of any vessel payload, so install it separately on each harbor.
+Keep credentials out of the file; loading instructions does not provision capacity or authorize spending by itself.
+
 ## Local setup
 
 `fm-anchor.sh` derives and exports the vessel layout, tmux worker environment and portable tool-state locations for `init`, `check` and `run`.

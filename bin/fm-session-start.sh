@@ -64,6 +64,12 @@
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
+#                       Vessel sessions also read optional
+#                       $FM_ANCHOR/.firstmate/.agents/compute.md as private compute
+#                       instructions, including on --reemit and read-only starts.
+#                       FM_ANCHOR must be absolute; no cwd-based discovery occurs.
+#                       Missing context means no configured compute instructions;
+#                       unreadable context is reported, never silently ignored.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -897,7 +903,8 @@ cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md. Vessel sessions also include the optional anchor-level
+.firstmate/.agents/compute.md as private compute instructions when FM_ANCHOR is absolute.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -1057,6 +1064,15 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [[ "${FM_ANCHOR:-}" = /* ]]; then
+  compute_context="$FM_ANCHOR/.firstmate/.agents/compute.md"
+  if [ -e "$compute_context" ] && { [ ! -f "$compute_context" ] || [ ! -r "$compute_context" ]; }; then
+    subsection "$compute_context (private compute instructions)"
+    printf 'UNREADABLE: expected a readable regular file; remote compute instructions are unavailable.\n'
+  else
+    print_file_or_absent "$compute_context" "$compute_context (private compute instructions)"
+  fi
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
