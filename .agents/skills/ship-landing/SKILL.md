@@ -28,7 +28,7 @@ The watcher owns teardown of a merged lane whose merge poll is armed, including 
 A lane parked on review (`bin/fm-park.sh`) has no agent and relaunches itself on review activity; `bin/fm-park.sh park <id>` parks one clean lane on request and `bin/fm-park.sh resume <id> --trigger <text>` relaunches one by hand.
 
 Tear down any other ship task only after landing is confirmed.
-A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
+A teardown refusal is a stop-and-investigate result: load `stuck-crewmate-recovery` for blocker ownership, including conflicting claims on one worktree, never bypass the refusal.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 

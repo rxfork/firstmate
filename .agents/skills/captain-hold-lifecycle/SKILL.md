@@ -73,7 +73,9 @@ The absence of a routed work item is not a divergence and the guard never requir
 4. Attest the full inventory for that review pass under the caller authority in Policy above.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Resolve each call through `answer`, board-requested reconciliation, or the declared PR settlement policy above, and use `--until` when the captain defers it.
-7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
+7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
+8. For released work, take the next authorized action or relay the answer through the existing keyed steering mechanism and confirm the worker resumes; recording the answer alone is not resumption.
+   If another prerequisite stops progress, apply `stuck-crewmate-recovery` to that blocker instead of reopening the answered question or creating a competing decision record.
 
 `bin/fm-captain-hold.sh --help` owns command syntax, close modes, legacy-identity compatibility, completion attestation, retry behavior, and close ordering.
 `docs/captain-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.

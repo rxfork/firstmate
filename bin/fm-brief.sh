@@ -187,7 +187,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
    When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
    Follow the resolution rule below when the wait clears, then resume the task.
-   Use \`blocked:\` when you are stuck and need help.
+   Use \`blocked:\` promptly when you are stuck and need firstmate's help, naming what stopped, the evidence, and the specific prerequisite or decision needed to resume; do not silently idle or address the captain directly.
 EOF
 
 resolve_directory_input() {

@@ -310,7 +310,7 @@ Load `away-quiet-supervision` whenever either mode is invoked, either record exi
 
 ### Stuck-worker trigger
 
-For the full `stuck-crewmate-recovery` trigger, including a live worker claiming its no-mistakes pipeline is dead, unreachable, or timed out, follow that skill's description.
+Load `stuck-crewmate-recovery` on an actionable blocker or cleanup refusal and during supervision reviews of unresolved blockers or failed cleanup; its description owns the remaining recovery triggers.
 
 ## 9. Escalation and captain etiquette
 

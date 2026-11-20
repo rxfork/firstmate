@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, on an actionable blocker or cleanup refusal, during supervision reviews of unresolved blockers or failed cleanup, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -20,6 +20,26 @@ Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> inte
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
+
+## Blocker ownership
+
+For each actionable blocker or refusal, identify what stopped, inspect current evidence, and use the relevant existing recovery or completion workflow.
+Firstmate owns the next action, including when a worker must perform a bounded recovery step.
+Resolve authorized recovery without waiting for the captain to rediscover the stopped task.
+Before leaving it unresolved, establish one of:
+
+- Recovery in progress, with a concrete next action and its owner recorded on the existing work item.
+- A genuine external wait, recording what is awaited, who can provide it, and the observable event or existing scheduled review that resumes work.
+- An authority decision, promptly presented under `AGENTS.md` section 9 with the evidence, concrete question, options, and recommendation; record and resume through `captain-hold-lifecycle`.
+
+Revisit unresolved blockers and failed cleanup during existing supervision reviews until resolved, explicitly deferred, or superseded with evidence.
+Repeated unchanged evidence calls for reassessing the recovery path, not another identical retry or progress report.
+Preserve unanswered decisions through the existing decision and reminder mechanisms rather than repeating unchanged notifications.
+A durable blocked record alone is not a next action.
+
+Recovery preserves all existing safety and authority boundaries: keep unlanded work, ownership evidence, validation ownership, authentication, required checks, and merge authority intact.
+A refusal does not authorize force, discard, rewriting ownership records to pass a guard, duplicate workers or validation runs, arbitrary restarts, unlimited retries, or expanded project scope.
+When no safe authorized step remains, ask the concrete authority question immediately; an intentional idle worker or empty queue requires no invented work.
 
 ## Managed approval failover
 
@@ -53,7 +73,7 @@ On T3 Code there is no replacement relaunch: the thread keeps its conversation, 
 Do not work around these refusals by respawning; preserve the recorded task and follow the backend's recovery contract.
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
-If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+If the worktree or ownership cannot be reconciled safely, preserve all state and the conflicting evidence, then apply Blocker ownership above rather than leaving a failed or blocked record as the final action.
 
 ## A live crewmate claiming the pipeline is dead
 
