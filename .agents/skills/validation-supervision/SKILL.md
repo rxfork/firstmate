@@ -21,7 +21,7 @@ Custody recovery settles branch ownership, not content: the worker must replace 
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
+An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and applies its shipping-scope evaluation and decision policy, including deferral, containment, and proposed requirement trade-offs.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
@@ -30,3 +30,23 @@ Judge validation by the resolved state line from [`bin/fm-crew-state.sh`](../../
 Workers parked at approval or fix-review must follow the active gate help.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+
+## Evidence-based progress
+
+At existing supervision reviews, inspect substantive validation evidence and when it last advanced, alongside the current-state reconciliation above.
+A running process, fresh log timestamp, repeated drive reattachment, or unchanged retry establishes activity, not useful progress.
+For each substantive validation update, identify the concrete behavior or scenario checked, its relevance to the authorized change, the latest observed result, and what remains.
+Separate product defects, test-environment failures, external waits, and missing coverage; state uncertainty when the evidence cannot distinguish them.
+Limit coverage claims to what was observed: bounded local tests do not establish whole-suite, real-device, browser, or deployed-system coverage.
+Keep ordinary no-change monitoring silent; surface meaningful findings, completed milestones, and concrete blockers with a recommended next action under `AGENTS.md` section 9.
+
+Use 30 minutes without substantive new evidence as the default investigation threshold at those reviews, not an overall test deadline or a captain-mandated timeout.
+This is supervisor judgment at existing reviews, not an automatic timer; reliable timed detection would require a separate implementation task.
+Investigate repeated setup attempts or unchanged retries without waiting for that threshold.
+Inspect the relevant validation logs and ask the owning worker for the exact scenario, attempts so far, newest substantive evidence and its time, relevance to the request, and a bounded next action with an observable result to review.
+Challenge scenarios unrelated to the authorized change and seek a relevant validation path through the existing ownership and decision flow rather than allowing unexplained open-ended work.
+A long legitimate test may continue when its relevance and progress are demonstrated; an evidenced external wait remains a wait, not test progress.
+If the worker is looping, unresponsive, or reports the pipeline dead or timed out, load `stuck-crewmate-recovery`.
+
+Investigation preserves the ownership and gate-response rules above: elapsed time alone authorizes no abort, restart, duplicate run, or hand-edit of active validation changes or bindings.
+It grants no authority to skip required checks, weaken authentication, fabricate evidence, claim completion, waive coverage, or add a manual review or approval gate.
