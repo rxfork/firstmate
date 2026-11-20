@@ -83,6 +83,7 @@ from fm_raise_anchor import (
     vessel_processes,
     with_stop_confirmation,
 )
+from fm_vessel_recovery import Recovery
 
 BASE_FIELDS = {"version", "anchored", "anchor", "harbor", "backend", "options"}
 ROUTE_FIELDS = {
@@ -287,7 +288,7 @@ def anchor_lock(anchor):
         current = path.stat(follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
             fail("anchor lock changed; retry the operation")
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -542,7 +543,9 @@ def remote(anchor, host, operation, request=None):
     return reply
 
 
-def prepare_source(anchor, record, destination, known, handoff_id=None, approved=None):
+def prepare_source(
+    anchor, record, destination, known, lock_fd, handoff_id=None, approved=None
+):
     if not shutil.which("rsync"):
         fail("rsync is required on the source harbor")
     retry = not record["anchored"] and (
@@ -552,6 +555,9 @@ def prepare_source(anchor, record, destination, known, handoff_id=None, approved
     if not record["anchored"] and not retry:
         fail("vessel is not available for this destination")
     check_payload(anchor, record)
+    receipt = Recovery(anchor, record, lock_fd).receipt
+    if receipt and receipt["phase"] != "complete":
+        fail("finish local fullstop/resume recovery before sailing")
     record = dict(record)
     record.update(
         anchored=False,
@@ -561,7 +567,7 @@ def prepare_source(anchor, record, destination, known, handoff_id=None, approved
         known_harbors=merge_harbors(known_harbors(record), known, [destination]),
     )
     write_record(anchor, record)
-    return {"record": record, **stop_vessel(anchor, record, approved)}
+    return {"record": record, **stop_vessel(anchor, record, approved, lock_fd=lock_fd)}
 
 
 def commit_source(anchor, record, destination):
@@ -619,7 +625,13 @@ def rsync_payload(anchor, record, source, destination):
     exclusions = [str(Path(record["options"]["TMUX_TMPDIR"]).relative_to(vessel)) + "/"]
     state = Path(record["options"]["FM_STATE_OVERRIDE"]).relative_to(vessel)
     exclusions.extend(
-        str(state / name) for name in (".lock", ".lock-session", ".lock-session.prev")
+        str(state / name)
+        for name in (
+            ".lock",
+            ".lock-session",
+            ".lock-session.prev",
+            ".vessel-recovery.json",
+        )
     )
     filters = [
         "--exclude=/" + re.sub(r"([\\*?\[])", r"\\\1", path) for path in exclusions
@@ -651,7 +663,7 @@ def rsync_payload(anchor, record, source, destination):
 
 def peer(anchor, operation):
     local = here()
-    with anchor_lock(anchor):
+    with anchor_lock(anchor) as lock_fd:
         if operation == "inspect":
             record = (
                 read_record(anchor) if vessel_path(anchor, ".json").exists() else None
@@ -799,6 +811,7 @@ def peer(anchor, operation):
                     record,
                     destination,
                     request["known_harbors"],
+                    lock_fd,
                     approved=request.get("approved"),
                 ),
             }
@@ -1046,7 +1059,7 @@ def require_separate_terminal(record):
 
 
 def scuttle(anchor, expected):
-    with anchor_lock(anchor):
+    with anchor_lock(anchor) as lock_fd:
         record = (
             read_record(anchor) if vessel_path(anchor, ".json").exists() else expected
         )
@@ -1056,10 +1069,12 @@ def scuttle(anchor, expected):
         while True:
             stopped = (
                 with_stop_confirmation(
-                    lambda approved: stop_vessel(anchor, record, approved)
+                    lambda approved: stop_vessel(
+                        anchor, record, approved, lock_fd=lock_fd
+                    )
                 )
                 if first
-                else stop_vessel(anchor, record)
+                else stop_vessel(anchor, record, lock_fd=lock_fd)
             )
             first = False
             if stopped["stopped"]:
@@ -1110,7 +1125,7 @@ def push(anchor, target, expected):
     host = harbor_name(target)
     if host == local:
         fail("destination is this harbor")
-    with anchor_lock(anchor):
+    with anchor_lock(anchor) as lock_fd:
         record = read_record(anchor)
         configuration = {**record_configuration(record), "anchored": True}
         if configuration != expected:
@@ -1166,13 +1181,19 @@ def push(anchor, target, expected):
                         record,
                         destination,
                         known,
+                        lock_fd,
                         handoff_id=record["handoff_id"],
                         approved=approved,
                     )
                 )
                 if first
                 else prepare_source(
-                    anchor, record, destination, known, handoff_id=record["handoff_id"]
+                    anchor,
+                    record,
+                    destination,
+                    known,
+                    lock_fd,
+                    handoff_id=record["handoff_id"],
                 )
             )
             first = False
@@ -1227,6 +1248,7 @@ def main():
             "check",
             "sail",
             "fullstop",
+            "resume",
             "status",
             "scuttle",
             "_peer",
@@ -1238,6 +1260,7 @@ def main():
     parser.add_argument("--anchor", required=True)
     parser.add_argument("--vessel", default="flagship")
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--if-pending", action="store_true")
     parser.add_argument("--agent")
     direction = parser.add_mutually_exclusive_group()
     direction.add_argument("--from", dest="source")
@@ -1256,6 +1279,8 @@ def main():
         ),
     )
     args = parser.parse_args()
+    if args.if_pending and args.operation != "resume":
+        parser.error("--if-pending requires resume")
     global VESSEL_NAME
     if not valid_name(args.vessel):
         parser.error(
@@ -1288,7 +1313,7 @@ def main():
             )
         )
         return
-    if args.operation in ("fullstop", "status", "_route"):
+    if args.operation in ("fullstop", "resume", "status", "_route"):
         expected = validate_configuration(json.load(sys.stdin), anchor)
         record = read_record(anchor)
         if record["harbor"] != here() or record["options"] != expected["options"]:
@@ -1322,16 +1347,29 @@ def main():
                 )
             )
         else:
-            with anchor_lock(anchor):
-                if record != read_record(anchor):
-                    fail("vessel changed before stopping; retry")
+            with anchor_lock(anchor) as lock_fd:
+                if record != read_record(anchor) or not record["anchored"]:
+                    fail("vessel changed or is not anchored here; retry locally")
+                recovery = Recovery(anchor, record, lock_fd)
+                if args.if_pending and (
+                    not recovery.receipt or recovery.receipt["phase"] == "complete"
+                ):
+                    return
                 require_separate_terminal(record)
-                result = with_stop_confirmation(
-                    lambda approved: stop_vessel(anchor, record, approved)
-                )
-                print(json.dumps(result))
-                if not result["stopped"]:
-                    sys.exit(1)
+                if args.operation == "resume":
+                    recovery.resume()
+                else:
+                    recovery.begin_stop()
+                    result = with_stop_confirmation(
+                        lambda approved: stop_vessel(anchor, record, approved, recovery)
+                    )
+                    print(json.dumps(result))
+                    if not result["stopped"]:
+                        print(
+                            f"fm-anchor: shutdown incomplete: {result['errors']}; remaining: {result['remaining']}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
         return
     if args.operation == "sail":
         expected = validate_configuration(json.load(sys.stdin), anchor)

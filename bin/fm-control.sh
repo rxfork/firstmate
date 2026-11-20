@@ -172,6 +172,9 @@ esac
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never
 # drive a crewmate's lifecycle (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# shellcheck source=bin/fm-vessel-lock-lib.sh
+. "$SCRIPT_DIR/fm-vessel-lock-lib.sh"
+fm_vessel_guard_mutation "${BASH_SOURCE[0]}" "$@" || exit 1
 
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-control refuses to resolve a task without an explicit firstmate home" >&2
@@ -1192,6 +1195,11 @@ record_note() {
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
+  # An interrupted vessel launch can leave its recoverable note in the brief.
+  if [ -n "${FM_VESSEL_RELAUNCH_TX:-}" ] && [ -n "$RELAUNCH_BRIEF" ] && grep -Fxq -- "$NOTE" "$RELAUNCH_BRIEF"; then
+    rm -f -- "$BRIEF_PRIOR"
+    return 0
+  fi
   case "$KIND" in
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
@@ -1262,7 +1270,7 @@ do_relaunch() {
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
-  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  RELAUNCH_TX="${FM_VESSEL_RELAUNCH_TX:-${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM}"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")

@@ -639,7 +639,7 @@ sailing_stops_registered_work_without_discarding_state() (
   setup_harbors known-work
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
   mkdir -p "$FM_FIXTURE_WORLD/source-core/bin" "$TMUX_TMPDIR/tmux-$(id -u)"
-  cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$ROOT/bin/fm_raise_anchor.py" "$FM_FIXTURE_WORLD/source-core/bin/"
+  cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$ROOT/bin/"fm_{raise_anchor,vessel_recovery}.py "$FM_FIXTURE_WORLD/source-core/bin/"
   for entry in 'fm-control.sh control' 'fm-watch-arm.sh watch'; do
     read -r name operation <<< "$entry"
     printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-harbors.py" %s "$@"\n' "$ROOT" "$operation" > "$FM_FIXTURE_WORLD/source-core/bin/$name"
@@ -1298,4 +1298,129 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
-fm_test_run host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity
+legacy_stop_without_evidence_refuses() (
+  local anchor="$TMP_ROOT/recovery-legacy" output
+  mkdir -p "$anchor"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  printf 'window=firstmate:fm-old\nharness=pi\nkind=ship\n' > "$FM_STATE_OVERRIDE/old.meta"
+  if output=$(bash "$ANCHOR_CLI" resume --anchor "$anchor" 2>&1); then fail 'resumed a legacy record without stop evidence'; fi
+  assert_contains "$output" 'old: no fullstop receipt' 'resume must name the evidence missing for an already-stopped legacy task'
+  [ -f "$FM_STATE_OVERRIDE/old.meta" ] || fail 'legacy refusal removed the task record'
+  bash "$ANCHOR_CLI" resume --anchor "$anchor" --if-pending -- touch "$TMP_ROOT/legacy-launch" || fail 'ordinary launch without a receipt was refused'
+  [ -f "$TMP_ROOT/legacy-launch" ] || fail 'ordinary launch did not run its command'
+  pass 'explicit resume requires evidence for legacy records; ordinary launch without a receipt still works'
+)
+
+recovery_fixture() {
+  local anchor="$1/a" tool mode dir
+  export FM_TEST_RECOVERY_WORLD=$1
+  mkdir -p "$anchor" "$1/core/bin" "$1/fakebin"
+  configure "$anchor"
+  bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+  cp "$ROOT/bin/"fm-{anchor.sh,vessel.py,vessel-lock-lib.sh,busy-lib.sh} "$ROOT/bin/"fm_{raise_anchor,vessel_recovery}.py "$1/core/bin/"
+  for dir in 'fakebin/tmux tmux' 'fakebin/no-mistakes daemon' 'core/bin/fm-control.sh control' 'core/bin/fm-watch-arm.sh watch' 'core/bin/fm-crew-state.sh crew'; do
+    read -r tool mode <<< "$dir"
+    printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-recovery.py" %s "$@"\n' "$ROOT" "$mode" > "$1/$tool"
+    chmod +x "$1/$tool"
+  done
+  # shellcheck disable=SC2016 # $2 is expanded by the generated backend function.
+  printf 'fm_backend_agent_state() { python3 "%s/tests/fixtures/fm-vessel-recovery.py" agent "$2"; }\n' "$ROOT" > "$1/core/bin/fm-backend.sh"
+  export PATH="$1/fakebin:$PATH"
+  local task project="$FM_PROJECTS_OVERRIDE/project"
+  fm_git_init_commit "$project"
+  for task in dirty parked; do
+    git -C "$project" worktree add --quiet -b "branch-$task" "$TREEHOUSE_ROOT/$task"
+    mkdir -p "$FM_DATA_OVERRIDE/$task"
+    printf 'original instructions\n' > "$FM_DATA_OVERRIDE/$task/brief.md"
+    printf 'window=firstmate:fm-%s\nworktree=%s\nproject=%s\nkind=ship\nharness=pi\nmode=local-only\nbranch=branch-%s\n' \
+      "$task" "$TREEHOUSE_ROOT/$task" "$project" "$task" > "$FM_STATE_OVERRIDE/$task.meta"
+  done
+  printf 'unsaved edits\n' > "$TREEHOUSE_ROOT/dirty/file"
+  printf 'captain decision pending at https://example.invalid/pull/7\n' > "$FM_STATE_OVERRIDE/parked.status"
+  touch "$1/validation-running"
+  env -i "$(command -v sleep)" 120 & recovery_server=$!
+  env -i "$(command -v sleep)" 120 & recovery_replacement=$!
+  env -i "$(command -v sleep)" 120 & recovery_pane=$!
+  trap 'kill "$recovery_server" "$recovery_replacement" "$recovery_pane" 2>/dev/null || true; wait "$recovery_server" "$recovery_replacement" "$recovery_pane" 2>/dev/null || true' EXIT
+  jq -n --arg root "$TREEHOUSE_ROOT" --argjson original "$recovery_server" --argjson next "$recovery_replacement" --argjson pane "$recovery_pane" '
+    {pid:$original, replacement_pid:$next, pane_pid:$pane, panes:{
+      "firstmate:fm-dirty":{index:1,pid:$pane,cwd:($root+"/dirty"),state:"alive"},
+      "firstmate:fm-parked":{index:2,pid:$pane,cwd:($root+"/parked"),state:"alive"}
+    }}' > "$1/tmux.json"
+  recovery_socket="$TMUX_TMPDIR/tmux-$(id -u)/default"
+  mkdir -p "${recovery_socket%/*}"
+  recovery_bind_socket
+  recovery_cli="$1/core/bin/fm-anchor.sh"
+}
+
+recovery_bind_socket() {
+  python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$recovery_socket"
+}
+
+fullstop_resume_replays_owned_work_once() (
+  local world="$TMP_ROOT/fr" output receipt
+  local recovery_server recovery_replacement recovery_pane recovery_socket recovery_cli
+  recovery_fixture "$world"
+  receipt="$FM_STATE_OVERRIDE/.vessel-recovery.json"
+  bash "$recovery_cli" fullstop --anchor "$FM_ANCHOR" > "$world/stop" || fail 'fullstop did not verify shutdown'
+  [ ! -S "$recovery_socket" ] && [ ! -e "$world/validation-running" ] || fail 'fullstop left original services running'
+  cp "$receipt" "$world/receipt"
+  printf 'corrupt\n' > "$receipt"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" --if-pending -- touch "$world/forbidden" 2>&1); then fail 'corrupt receipt allowed launch'; fi
+  assert_contains "$output" 'corrupt fullstop receipt' 'corrupt receipt diagnostic'
+  [ ! -e "$world/forbidden" ] || fail 'launch executed after failed recovery'
+  cp "$world/receipt" "$receipt"
+  mv "$TREEHOUSE_ROOT/dirty" "$TREEHOUSE_ROOT/missing"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'missing directory allowed resume'; fi
+  assert_contains "$output" 'isolated vessel worktree is missing' 'missing directory diagnostic'
+  mv "$TREEHOUSE_ROOT/missing" "$TREEHOUSE_ROOT/dirty"
+  cp "$FM_STATE_OVERRIDE/dirty.meta" "$world/dirty.meta"
+  printf 'home=/outside\n' >> "$FM_STATE_OVERRIDE/dirty.meta"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'foreign-home record allowed resume'; fi
+  assert_contains "$output" 'not a local vessel worker' 'foreign-home diagnostic'
+  cp "$world/dirty.meta" "$FM_STATE_OVERRIDE/dirty.meta"
+  recovery_bind_socket
+  jq --argjson pid "$recovery_replacement" '.pid = $pid' "$world/tmux.json" > "$world/changed"
+  mv "$world/changed" "$world/tmux.json"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'foreign socket allowed resume'; fi
+  assert_contains "$output" 'socket path reused' 'reused socket diagnostic'
+  rm "$recovery_socket"
+  touch "$world/fail-window" "$world/fail-launch" "$world/block-launch"
+  if bash "$recovery_cli" resume --anchor "$FM_ANCHOR" > "$world/interrupted" 2>&1; then fail 'interrupted empty endpoint publication succeeded'; fi
+  [ ! -e "$world/launches" ] || fail 'worker launched at an unacknowledged endpoint'
+  bash "$recovery_cli" resume --anchor "$FM_ANCHOR" > "$world/lost-launch" 2>&1 & local resuming=$!
+  for _ in $(seq 1 200); do [ ! -e "$world/blocked" ] || break; sleep 0.05; done
+  [ -e "$world/blocked" ] || fail "resume did not reach launch: $(< "$world/lost-launch")"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'concurrent resume acquired the lock'; fi
+  assert_contains "$output" 'another anchor operation' 'concurrent resume conflict diagnostic'
+  rm "$world/block-launch"
+  if wait "$resuming"; then fail 'interrupted replacement publication succeeded'; fi
+  bash "$recovery_cli" resume --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" > "$world/final" 2>&1 || fail "resume did not adopt the published worker: $(< "$world/final")"
+  [ -f "$world/primary" ] || fail 'launch did not run after successful recovery'
+  bash "$recovery_cli" resume --anchor "$FM_ANCHOR" || fail 'repeated resume failed'
+  [ "$(< "$world/launches")" = dirty ] && [ "$(< "$world/starts")" = validation ] || fail 'resume duplicated launch or restarted validation twice'
+  [ "$(< "$TREEHOUSE_ROOT/dirty/file")" = 'unsaved edits' ] || fail 'resume discarded dirty work'
+  [ "$(< "$FM_STATE_OVERRIDE/parked.status")" = 'captain decision pending at https://example.invalid/pull/7' ] || fail 'resume changed validation decision custody'
+  assert_contains "$(< "$world/final")" 'worker began processing its recovered instructions' 'resume must wait for native turn proof'
+  pass 'fullstop migrates live legacy records; interrupted publication and concurrent resume launch one worker and preserve parked work'
+)
+
+interrupted_fullstop_retains_the_original_worker() (
+  local world="$TMP_ROOT/is" output
+  local recovery_server recovery_replacement recovery_pane recovery_socket recovery_cli
+  recovery_fixture "$world"
+  touch "$world/refuse-stop"
+  if bash "$recovery_cli" fullstop --anchor "$FM_ANCHOR" > "$world/stop" 2>&1; then fail 'unconfirmed worker stop succeeded'; fi
+  [ -S "$recovery_socket" ] || fail 'unverified stop destroyed the original server'
+  mv "$recovery_socket" "$recovery_socket.offline"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'unavailable live original server allowed resume'; fi
+  assert_contains "$output" 'original tmux server unavailable' 'missing original socket diagnostic'
+  mv "$recovery_socket.offline" "$recovery_socket"
+  bash "$recovery_cli" resume --anchor "$FM_ANCHOR" > "$world/resume" 2>&1 || fail "interrupted stop could not resume: $(< "$world/resume")"
+  assert_contains "$(< "$world/resume")" 'left the original live worker intact' 'resume must adopt the original process'
+  [ ! -e "$world/launches" ] || fail 'interrupted fullstop duplicated an original worker'
+  pass 'interrupted fullstop refuses an unavailable live server and adopts its original workers on reconnect'
+)
+
+fm_test_run legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

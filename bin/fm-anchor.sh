@@ -6,6 +6,7 @@
 #        fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]
 #        fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]
 #        fm-anchor.sh fullstop --anchor DIRECTORY [--vessel NAME]
+#        fm-anchor.sh resume --anchor DIRECTORY [--vessel NAME] [--if-pending -- COMMAND [ARG...]]
 #        fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]
 #        fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)
 # open prompts to initialize or sail an unregistered vessel, otherwise follows
@@ -45,7 +46,7 @@
 # deletion, not files that may share hardlinks with outside repositories.
 set -eu
 fail() { printf 'fm-anchor: %s\n' "$*" >&2; exit 1; }
-usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]\n       fm-anchor.sh fullstop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nSail --cancel revokes an inactive destination before reopening the source; unavailable or active destinations refuse.\nInterrupted initialization resumes on open or init. Host XDG paths are unchanged.\nOpen prompts to initialize or sail before running the supplied command.\nFullstop is also available as fm-raise-anchor.sh; terminal escalation offers SIGTERM [Y/n], then SIGKILL [y/N].\nNoninteractive stopping refuses remaining processes without assuming consent.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
+usage() { printf 'Usage: fm-anchor.sh init --anchor DIRECTORY [--vessel NAME] --agent NAME\n       fm-anchor.sh check --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh run --anchor DIRECTORY [--vessel NAME] -- COMMAND [ARG...]\n       fm-anchor.sh open --anchor DIRECTORY [--vessel NAME] --agent NAME -- COMMAND [ARG...]\n       fm-anchor.sh sail --anchor DIRECTORY [--vessel NAME] [--from HARBOR | --to HARBOR | --cancel]\n       fm-anchor.sh fullstop --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh resume --anchor DIRECTORY [--vessel NAME] [--if-pending -- COMMAND [ARG...]]\n       fm-anchor.sh status --anchor DIRECTORY [--vessel NAME]\n       fm-anchor.sh scuttle --anchor DIRECTORY [--vessel NAME] (--confirm | --interactive)\nAll operations accept --vessel NAME (default flagship). list --anchor DIRECTORY [--vessel NAME] prints registered names without SSH or writes.\nVessels live at .firstmate/NAME with sibling NAME.json and NAME.lock.\nSailing requires identical physical anchor paths and SSH/rsync; unconfirmed source stops prevent copying.\nRun --to from a separate terminal and keep the source online until destination acknowledgement.\nSail --cancel revokes an inactive destination before reopening the source; unavailable or active destinations refuse.\nInterrupted initialization resumes on open or init. Host XDG paths are unchanged.\nOpen prompts to initialize or sail before running the supplied command.\nFullstop is also available as fm-raise-anchor.sh; terminal escalation offers SIGTERM [Y/n], then SIGKILL [y/N].\nNoninteractive stopping refuses remaining processes without assuming consent.\nScuttle irreversibly discards all local vessel work and history; --confirm or typed --interactive confirmation is required.\n'; }
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   _peer)
@@ -81,6 +82,12 @@ case "$mode" in
     fi
     agent=$2
     if [ "$mode" = open ]; then shift 3; fi
+    ;;
+  resume)
+    if [ "$#" -ne 0 ]; then
+      [ "$#" -ge 3 ] && [ "$1" = --if-pending ] && [ "$2" = -- ] || { usage >&2; exit 2; }
+      shift 2
+    fi
     ;;
   check|fullstop|status|list) [ "$#" -eq 0 ] || { usage >&2; exit 2; } ;;
   scuttle)
@@ -206,7 +213,12 @@ if [ "$mode" = scuttle ] && [ "$1" = --interactive ]; then
   [ "$answer" = SCUTTLE ] || fail 'scuttle cancelled'
   set -- --confirm
 fi
-if [ "$mode" = sail ] || [ "$mode" = fullstop ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
+if [ "$mode" = resume ] && [ "$#" -ne 0 ]; then
+  # The same sandbox stays in effect for recovered workers and the primary.
+  printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" resume --anchor "$anchor" --vessel "$vessel_name" --if-pending
+  exec "$@"
+fi
+if [ "$mode" = sail ] || [ "$mode" = fullstop ] || [ "$mode" = resume ] || [ "$mode" = status ] || [ "$mode" = scuttle ]; then
   # Preserve caller input separately from the JSON configuration pipe.
   exec 3<&0
   printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" "$mode" --anchor "$anchor" --vessel "$vessel_name" "$@"
@@ -216,9 +228,17 @@ mkdir -p -- "$namespace"
 if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -f "$lock" ]; }; then
   fail 'anchor lock must be a regular file'
 fi
-exec 9>> "$lock"
-flock -n 9 || fail 'another anchor operation is in progress'
-[ ! -L "$lock" ] && [ "$lock" -ef /proc/self/fd/9 ] || fail 'anchor lock changed; retry the operation'
+# shellcheck source=bin/fm-vessel-lock-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-vessel-lock-lib.sh"
+if [ "$mode" != check ] || ! fm_vessel_has_exclusive_lock "$lock"; then
+  exec 9>> "$lock"
+  if [ "$mode" = check ]; then
+    flock -sn 9 || fail 'another anchor operation is in progress'
+  else
+    flock -n 9 || fail 'another anchor operation is in progress'
+  fi
+  [ ! -L "$lock" ] && [ "$lock" -ef /proc/self/fd/9 ] || fail 'anchor lock changed; retry the operation'
+fi
 if [ "$mode" = init ] && { [ ! -e "$metadata" ] || [ -e "$initializing" ]; }; then
   record=$(printf '%s\n' "$snapshot" | python3 "$(dirname "${BASH_SOURCE[0]}")/fm-vessel.py" init --anchor "$anchor" --vessel "$vessel_name" --agent "$agent")
 elif [ -e "$metadata" ]; then

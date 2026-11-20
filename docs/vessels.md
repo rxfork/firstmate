@@ -192,7 +192,23 @@ bash bin/fm-anchor.sh status --anchor /absolute/anchor
 bash bin/fm-raise-anchor.sh --anchor /absolute/anchor
 # Or use the core fullstop command directly:
 bash bin/fm-anchor.sh fullstop --anchor /absolute/anchor
+# Recover workers without opening the primary (the personal launcher calls this via aheadfull):
+bash bin/fm-anchor.sh resume --anchor /absolute/anchor
 ```
+
+Local fullstop checkpoints the vessel's tmux server and pane identities and the worker's isolated directory and instruction reference in a private receipt under the vessel state directory.
+It records confirmed worker stops before removing the server; an unavailable socket alone is not evidence of a stop.
+Resume leaves a positively identified live original worker alone, recreates only proven-stopped worker endpoints, and uses the existing relaunch transaction in the recorded worktree.
+Completed and validation-waiting tasks are not relaunched, and a validation daemon that was running is restarted and checked without submitting another validation.
+The personal launcher's `aheadfull` runs recovery without opening Pi.
+`firstmate launch` checks for a fullstop receipt and requires recovery to succeed before opening Pi.
+Project-specific services outside the vessel's managed lifecycle are not automatically restarted.
+A replacement is confirmed only after an incarnation-bound native turn signal, so a harness without that signal reports an unconfirmed launch rather than retrying it.
+
+For a legacy task without a receipt, reconnect its original vessel tmux server at the recorded vessel socket and run fullstop while its endpoint is still verifiable.
+If that server was already discarded, there is no supported automatic recovery from the task record alone; leave the record and working copy intact and reconcile the original worker's history instead of making a lookalike pane or editing the record.
+Retry interrupted fullstop or resume from the same harbor; a reused socket, foreign receipt or unverifiable launch fails closed.
+The receipt is host-local and is not transferred by sailing.
 
 The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
 This is not certification of every possible writer: a service that clears those references may not be attributable to the vessel.

@@ -192,7 +192,10 @@ def validate_approval(approved):
     if (
         not isinstance(approved, dict)
         or set(approved) - {"force_review_stop"} != {"signal", "processes"}
-        or ("force_review_stop" in approved and approved["force_review_stop"] is not True)
+        or (
+            "force_review_stop" in approved
+            and approved["force_review_stop"] is not True
+        )
         or approved["signal"] not in ("SIGTERM", "SIGKILL")
         or not isinstance(approved["processes"], list)
     ):
@@ -239,24 +242,42 @@ def signal_processes(record, processes, approved):
             os.close(fd)
 
 
-def stop_vessel(anchor, record, approved=None):
-    if approved is not None:
-        validate_approval(approved)
-    options = record["options"]
+def vessel_environment(anchor, record):
     environment = {
         **os.environ,
-        **options,
+        **record["options"],
         "FM_ANCHOR": str(anchor),
         "FM_BACKEND": "tmux",
     }
-    for name in ("TMUX", "TMUX_PANE", "FM_ROOT_OVERRIDE"):
+    for name in (
+        "TMUX",
+        "TMUX_PANE",
+        "FM_ROOT_OVERRIDE",
+        "FM_VESSEL_RELAUNCH_TX",
+        "FM_VESSEL_RECOVERY_FD",
+    ):
         environment.pop(name, None)
+    return environment
+
+
+def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
+    if approved is not None:
+        validate_approval(approved)
+    options = record["options"]
+    environment = vessel_environment(anchor, record)
     scripts = Path(__file__).resolve().parent
     errors = []
 
-    def stop(command):
+    def stop(command, lifecycle=False):
+        env = environment
+        if lifecycle and lock_fd is not None:
+            env = {**env, "FM_VESSEL_RECOVERY_FD": str(lock_fd)}
         result = subprocess.run(
-            command, env=environment, stdout=sys.stderr, check=False
+            command,
+            env=env,
+            stdout=sys.stderr,
+            check=False,
+            pass_fds=(lock_fd,) if lifecycle and lock_fd is not None else (),
         )
         if result.returncode:
             errors.append(
@@ -265,7 +286,9 @@ def stop_vessel(anchor, record, approved=None):
 
     socket = Path(options["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
     shells = set()
-    if socket.is_socket():
+    if recovery is not None:
+        recovery.stop_workers()
+    if socket.is_socket() and recovery is None:
         windows = subprocess.check_output(
             [
                 "tmux",
@@ -286,7 +309,10 @@ def stop_vessel(anchor, record, approved=None):
                 if "=" in line
             )
             if metadata.get("window") in windows:
-                stop([str(scripts / "fm-control.sh"), path.stem, "exit"])
+                stop(
+                    [str(scripts / "fm-control.sh"), path.stem, "exit"], lifecycle=True
+                )
+    if socket.is_socket():
         panes = subprocess.check_output(
             [
                 "tmux",
@@ -395,6 +421,8 @@ def stop_vessel(anchor, record, approved=None):
                 os.close(fd)
         stop([str(scripts / "fm-watch-arm.sh"), "--stop"])
         if socket.is_socket() and not errors:
+            if recovery is not None:
+                recovery.before_server_stop()
             stop(["tmux", "-S", str(socket), "kill-server"])
         # Pi's sandbox wrapper can take a moment to finish its own cleanup.
         deadline = time.monotonic() + 5
