@@ -83,7 +83,7 @@ from fm_raise_anchor import (
     vessel_processes,
     with_stop_confirmation,
 )
-from fm_vessel_recovery import Recovery
+from fm_vessel_recovery import Recovery, digest
 
 BASE_FIELDS = {"version", "anchored", "anchor", "harbor", "backend", "options"}
 ROUTE_FIELDS = {
@@ -678,6 +678,97 @@ def rsync_payload(anchor, record, source, destination):
     )
 
 
+def repair_snapshot(anchor, record, recovery, source=False):
+    check_payload(anchor, record)
+    if vessel_processes(anchor, record):
+        fail(
+            "vessel processes are still running; close them before repairing the handoff"
+        )
+    socket = recovery.socket
+    if socket.exists() or socket.is_symlink():
+        if not source or not stat.S_ISSOCK(socket.lstat().st_mode):
+            fail(
+                f"refusing to repair with a destination or unexpected tmux socket: {socket}"
+            )
+        probe = subprocess.run(
+            ["tmux", "-S", str(socket), "list-sessions"],
+            env=recovery.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode != 1 or probe.stderr.strip() not in (
+            f"no server running on {socket}",
+            f"error connecting to {socket} (Connection refused)",
+        ):
+            fail(f"cannot verify that the source tmux server is stopped: {socket}")
+    tasks = {}
+    for path in sorted(recovery.state.glob("*.meta")):
+        task = path.stem
+        meta = recovery.metadata(task)
+        tasks[task] = meta, recovery.task_identity(task, meta)
+    return tasks
+
+
+def repair_fingerprints(tasks):
+    return {
+        task: digest(
+            [meta, {**identity, "directory": None}, Path(identity["brief"]).read_text()]
+        )
+        for task, (meta, identity) in tasks.items()
+    }
+
+
+def repair_sail(anchor, host):
+    with anchor_lock(anchor) as lock_fd:
+        record = read_record(anchor)
+        if (
+            not record["anchored"]
+            or record["harbor"] != here()
+            or record["last_known_harbor"] != here()
+            or "sailing_to" in record
+            or not record.get("handoff_id")
+        ):
+            fail("repair requires the active destination of a completed sail")
+        recovery = Recovery(anchor, record, lock_fd)
+        if recovery.receipt is not None:
+            fail("a recovery receipt already exists; do not overwrite it")
+        tasks = repair_snapshot(anchor, record, recovery)
+        if not tasks:
+            fail("no transferred worker records to repair")
+        proof = remote(anchor, host, "repair-proof", {"arrival": record})
+        if proof["fingerprints"] != repair_fingerprints(tasks):
+            fail(
+                "source and destination worker records or briefs differ; no receipt written"
+            )
+        parked = set(proof["parked"])
+        if not parked <= tasks.keys():
+            fail("source returned unexpected parked worker records")
+        recovery.receipt = {
+            "version": 1,
+            "owner": recovery.owner,
+            "socket": str(recovery.socket),
+            "server": None,
+            "tasks": {
+                task: {
+                    "identity": identity,
+                    "pane": None,
+                    "generation": meta.get("spawn_gen"),
+                    "validation_wait": task in parked,
+                    "outcome": "parked" if task in parked else "stopped",
+                }
+                for task, (meta, identity) in tasks.items()
+            },
+            "phase": "stopping",
+            "shutdown": True,
+            "handoff_id": record["handoff_id"],
+            "token": uuid.uuid4().hex,
+            "restart_validation": False,
+        }
+        recovery.save()
+        print(json.dumps({"repaired": sorted(tasks), "parked": sorted(parked)}))
+
+
 def peer(anchor, operation):
     local = here()
     with anchor_lock(anchor) as lock_fd:
@@ -700,6 +791,35 @@ def peer(anchor, operation):
                 "error": error,
             }
         request = json.load(sys.stdin)
+        if operation == "repair-proof":
+            arrival = validate_record(request["arrival"], anchor)
+            record = read_record(anchor)
+            if (
+                record["anchored"]
+                or "sailing_to" in record
+                or record["harbor"] != local
+                or local == arrival["harbor"]
+                or record["last_known_harbor"] != arrival["harbor"]
+                or not arrival["anchored"]
+                or not record.get("handoff_id")
+                or any(
+                    record[key] != arrival[key]
+                    for key in ("handoff_id", "vessel_id", "options")
+                )
+            ):
+                fail("this harbor is not the inactive source of the requested handoff")
+            recovery = Recovery(anchor, record, lock_fd)
+            if recovery.receipt and recovery.receipt["phase"] != "complete":
+                fail(
+                    "source has an existing recovery receipt; do not replace it with a legacy repair"
+                )
+            tasks = repair_snapshot(anchor, record, recovery, source=True)
+            return {
+                "here": local,
+                "record": record,
+                "fingerprints": repair_fingerprints(tasks),
+                "parked": [task for task in tasks if recovery.crew_waiting(task)],
+            }
         if operation == "cancel-source":
             arrival = validate_record(request["arrival"], anchor)
             record = read_record(anchor)
@@ -1271,6 +1391,7 @@ def main():
             "sail",
             "fullstop",
             "resume",
+            "repair-sail",
             "status",
             "scuttle",
             "_peer",
@@ -1298,6 +1419,7 @@ def main():
             "activate",
             "cancel",
             "cancel-source",
+            "repair-proof",
         ),
     )
     args = parser.parse_args()
@@ -1317,6 +1439,11 @@ def main():
         fail("initialization reservation must not be a symlink")
     if pending.exists() and args.operation not in ("init", "scuttle", "list"):
         fail("initialization is unfinished; retry open or init")
+    if args.operation == "repair-sail":
+        if not args.source:
+            parser.error("repair-sail requires --from SOURCE_HARBOR")
+        repair_sail(anchor, args.source)
+        return
     if args.operation == "list":
         names = []
         namespace = anchor / ".firstmate"

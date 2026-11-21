@@ -687,7 +687,21 @@ sailing_stops_registered_work_without_discarding_state() (
   bash "$ANCHOR_CLI" resume --anchor "$FM_ANCHOR" || fail 'destination did not accept the transferred recovery receipt'
   [ ! -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || fail 'resume launched deliberately parked work'
   jq -se '[.[] | select(.operation == "control")] | length == 1' "$FM_FIXTURE_WORLD/stop-calls" >/dev/null || fail 'retry stopped the worker more than once'
-  pass 'sailing stops registered workers and leaves the transferred task recoverable'
+  # Emulate an older completed handoff that did not retain either receipt.
+  local receipt="$FM_STATE_OVERRIDE/.vessel-recovery.json" brief="$FM_DATA_OVERRIDE/$task/brief.md"
+  rm "$receipt" "$FM_FIXTURE_WORLD/hosts/desktop/anchor/.firstmate/flagship/state/.vessel-recovery.json"
+  printf 'changed instructions\n' > "$brief"
+  if python3 "$ROOT/bin/fm-vessel.py" repair-sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/repair" 2>&1; then
+    fail 'repair accepted a changed task brief'
+  fi
+  assert_contains "$(< "$FM_FIXTURE_WORLD/repair")" 'worker records or briefs differ' 'repair mismatch diagnostic'
+  [ ! -e "$receipt" ] || fail 'failed repair wrote a receipt'
+  printf 'original instructions\n' > "$brief"
+  python3 "$ROOT/bin/fm-vessel.py" repair-sail --anchor "$FM_ANCHOR" --from desktop >"$FM_FIXTURE_WORLD/repair" || fail 'legacy handoff repair failed'
+  jq -e '.repaired == ["fixture-worker"] and .parked == ["fixture-worker"]' "$FM_FIXTURE_WORLD/repair" >/dev/null || fail 'repair did not preserve parked state'
+  bash "$ANCHOR_CLI" resume --anchor "$FM_ANCHOR" || fail 'resume did not accept the repaired handoff'
+  [ "$(< "$TREEHOUSE_ROOT/$task/file")" = 'uncommitted work' ] || fail 'repair changed the worktree'
+  pass 'sailing preserves verified worker stops and legacy repair verifies matching task records before restoring recovery'
 )
 
 unavailable_sources_report_the_payload_reason() (
