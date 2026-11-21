@@ -362,8 +362,10 @@ Ship instructions and scout promotion create the actual branch inside the isolat
 `fm-teardown.sh` is the task cleanup owner and `fm-backlog-transition-lib.sh` owns its close receipt; an in-progress receipt does not substitute for verified release.
 Bootstrap and the bounded inactive scan reconcile close receipts, and the scan delegates physical replay to teardown when the receipt proves a tmux stop and the remaining work can be inspected safely.
 Vessel task temp allocations are reserved in the owning home before creation, so the scan can reclaim an empty allocation that was never handed off to a worker, without inspecting the shared temporary directory.
-Fresh vessel tmux launches reserve a private token before opening the shell, and the scan can close that exact tagged shell while its receipt still proves no worktree request was sent.
-Once a worktree request could have run, supervision keeps the launch receipt, including the exact copy when known, and reports the ownership gap instead of treating the endpoint as an unused shell.
+Fresh vessel tmux launches reserve a private token before opening the shell and use the same token to acquire a durable Treehouse lease.
+Before handoff, supervision can find the exact lease even if Treehouse's allocation reply was lost, close only the tagged shell, and return a clean, idle, detached copy using Treehouse's holder and lease identity checks.
+After handoff, missing metadata is an ownership exception rather than evidence that the work is disposable.
+Automatic vessel cleanup stops when remote ownership cannot be verified and leaves the record and working copy for operator reconciliation.
 Failed Orca launches and ambiguous validation or endpoint ownership retain their records and surface a recoverable exception rather than retrying a destructive command.
 Vessel fullstop stop proofs remain with the vessel recovery owner, not the task cleanup scan.
 Remote validation and the remote-job service own their own allocations; task cleanup does not sweep the account's process table for remote service workers.

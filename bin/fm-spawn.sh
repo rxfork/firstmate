@@ -6246,6 +6246,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     :
   elif [ "$BACKEND" = herdr ]; then
     spawn_lease_herdr_slot
+  elif [ -n "$VESSEL_ALLOCATION" ]; then
+    # Treehouse can find a successful allocation by holder even if its reply
+    # was lost. Keep the endpoint staged until the exact copy is recorded.
+    spawn_record_vessel_allocation reserving || exit 1
+    WT=$(cd "$PROJ_ABS" && spawn_treehouse_get --lease --lease-holder "fm-$VESSEL_ALLOCATION_TOKEN") || exit 1
+    validate_spawn_worktree 'treehouse get --lease' "$WT"
+    spawn_record_vessel_allocation reserved "$WT" || exit 1
+    tmux -S "$VESSEL_SOCKET" if-shell -F -t "$WT_TARGET" \
+      "#{==:#{@fm-task-allocation},$VESSEL_ALLOCATION_TOKEN}" \
+      "rename-window -t $WT_TARGET $W" || exit 1
+    vessel_window_binding=$(tmux -S "$VESSEL_SOCKET" list-windows -t "=$SES" \
+      -F '#{window_name} #{window_id} #{@fm-task-allocation}' | awk -v window="$W" '$1 == window')
+    if [ "$vessel_window_binding" != "$W $WT_TARGET $VESSEL_ALLOCATION_TOKEN" ]; then
+      echo "error: cannot verify the staged vessel window became $T without conflict" >&2
+      exit 1
+    fi
   else
     treehouse_command='treehouse get'
     if [ "$SPAWN_GITHUB_HTTPS" = 1 ]; then
@@ -6259,20 +6275,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         treehouse_command="unset $worker_env_name; $treehouse_command"
       fi
     done
-    if [ -n "$VESSEL_ALLOCATION" ]; then
-      # An interrupted Treehouse request may have allocated a copy even if
-      # the shell never reported its path. Never auto-close that shell as staged.
-      spawn_record_vessel_allocation leasing || exit 1
-      tmux -S "$VESSEL_SOCKET" if-shell -F -t "$WT_TARGET" \
-        "#{==:#{@fm-task-allocation},$VESSEL_ALLOCATION_TOKEN}" \
-        "rename-window -t $WT_TARGET $W" || exit 1
-      vessel_window_binding=$(tmux -S "$VESSEL_SOCKET" list-windows -t "=$SES" \
-        -F '#{window_name} #{window_id} #{@fm-task-allocation}' | awk -v window="$W" '$1 == window')
-      if [ "$vessel_window_binding" != "$W $WT_TARGET $VESSEL_ALLOCATION_TOKEN" ]; then
-        echo "error: cannot verify the staged vessel window became $T without conflict" >&2
-        exit 1
-      fi
-    fi
     spawn_send_text_line "$WT_TARGET" "$treehouse_command"
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -6363,9 +6365,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
     SPAWN_SLOT_CLAIMED=1
-  fi
-  if [ -n "$VESSEL_ALLOCATION" ]; then
-    spawn_record_vessel_allocation claimed "$WT" || exit 1
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
@@ -7505,6 +7504,9 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+if [ -n "$VESSEL_ALLOCATION" ]; then
+  spawn_record_vessel_allocation handed-off "$WT" || exit 1
+fi
 if [ -n "$temp_owner" ]; then
   temp_owner_stage=$(umask 077; mktemp "$temp_owner.XXXXXX") || exit 1
   if ! { printf 'handed-off=%s\n' "$TASK_TMP" > "$temp_owner_stage" &&
@@ -8543,7 +8545,4 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
-if [ -n "$VESSEL_ALLOCATION" ]; then
-  rm -- "$VESSEL_ALLOCATION" || echo "warning: could not retire allocation receipt $VESSEL_ALLOCATION" >&2
-fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

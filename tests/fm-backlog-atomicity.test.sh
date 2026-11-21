@@ -2257,6 +2257,52 @@ test_supervision_reaps_only_unclaimed_staged_temp() {
   pass 'supervision reclaims proven staged temp without touching occupied or unreceipted directories'
 }
 
+test_supervision_recovers_treehouse_lease_without_create_reply() (
+  command -v treehouse >/dev/null || { pass 'skipped: Treehouse is not installed'; return; }
+  local case_dir home id receipt out token project wt sock base
+  id=atomic-lost-treehouse-reply-b10
+  token=0123456789abcdef0123456789abcdef
+  case_dir=$(make_home lost-treehouse-reply)
+  home=$(home_of "$case_dir")
+  export FM_ANCHOR="$case_dir/anchor" FM_VESSEL=flagship TREEHOUSE_ROOT="$case_dir/pool"
+  export TMUX_TMPDIR="$case_dir/vessel-tmux"
+  sock="$TMUX_TMPDIR/tmux-$(id -u)/default"
+  mkdir -p -- "$FM_ANCHOR/.firstmate" "$(dirname "$sock")"
+  touch "$FM_ANCHOR/.firstmate/flagship.lock"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$sock" || fail 'fixture socket failed'
+  # The socket inventory stub reports the staged shell already gone. All
+  # worktree allocation, Git proof, conditional return and inventory are real.
+  fm_fake_exit0 "$case_dir/fakebin" tmux
+  rm -- "$case_dir/fakebin/treehouse"
+  project="$home/projects/lease-repo"
+  fm_git_init_commit "$project"
+  receipt="$home/state/$id.launch-allocation"
+  add_item "$case_dir" "$id"
+  printf 'phase=reserving\nsocket=%s\nsession=firstmate\ntoken=%s\nproject=%s\nworktree=\n' \
+    "$sock" "$token" "$project" > "$receipt"
+  wt=$(cd "$project" && treehouse get --lease --lease-holder "fm-$token") || fail 'fixture allocation failed'
+  printf 'valuable work\n' > "$wt/new.txt"
+  out=$(run_cleanup_scan "$case_dir") || fail "cleanup scan failed: $out"
+  assert_contains "$out" 'cannot verify safe return' 'dirty lease refusal was not reported'
+  assert_present "$wt/new.txt" 'cleanup discarded an untracked file'
+  assert_present "$receipt" 'cleanup lost allocation ownership'
+  mv -- "$wt/new.txt" "$case_dir/recovered.txt"
+  base=$(git -C "$wt" rev-parse HEAD) || fail 'fixture has no base'
+  git -C "$wt" -c user.name=Fixture -c user.email=fixture@test commit --allow-empty -qm unlanded \
+    || fail 'could not create unlanded fixture commit'
+  out=$(run_cleanup_scan "$case_dir") || fail "cleanup scan failed: $out"
+  assert_present "$receipt" 'cleanup removed an unlanded copy'
+  [ "$(git -C "$wt" log -1 --format=%s)" = unlanded ] || fail 'cleanup changed the copy HEAD'
+  git -C "$wt" branch keep-unlanded || fail 'could not retain the fixture commit'
+  git -C "$wt" switch --detach -q "$base" || fail 'could not restore the fixture base'
+  out=$(run_cleanup_scan "$case_dir") || fail "cleanup scan failed: $out"
+  assert_contains "$out" 'Reconciled unhanded vessel launch allocation' 'cleanup did not recover the lease by holder'
+  assert_absent "$receipt" 'released allocation receipt remained'
+  (cd "$project" && treehouse status --json) | jq -e 'length == 1 and .[0].status == "available"' >/dev/null \
+    || fail 'Treehouse did not return the local copy to its pool'
+  pass 'supervision finds a real lost-reply Treehouse lease, preserves dirty work and returns the clean copy'
+)
+
 test_supervision_preserves_interrupted_worktree_acquisition() {
   local case_dir home id receipt out
   id=atomic-interrupted-lease-b10
@@ -2264,7 +2310,7 @@ test_supervision_preserves_interrupted_worktree_acquisition() {
   home=$(home_of "$case_dir")
   receipt="$home/state/$id.launch-allocation"
   add_item "$case_dir" "$id"
-  printf 'phase=claimed\nsocket=/unavailable/socket\nsession=fixture\ntoken=0123456789abcdef0123456789abcdef\nproject=%s\nworktree=%s\n' \
+  printf 'phase=handed-off\nsocket=/unavailable/socket\nsession=fixture\ntoken=0123456789abcdef0123456789abcdef\nproject=%s\nworktree=%s\n' \
     "$case_dir/project" "$case_dir/wt" > "$receipt"
   printf 'valuable work\n' > "$case_dir/wt/unsaved"
   out=$(run_cleanup_scan "$case_dir")
@@ -3295,6 +3341,7 @@ test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_supervision_reaps_only_unclaimed_staged_temp
+test_supervision_recovers_treehouse_lease_without_create_reply
 test_supervision_preserves_interrupted_worktree_acquisition
 test_supervision_refuses_unverified_resource_release
 test_recovery_retry_preserves_incomplete_cleanup_warning

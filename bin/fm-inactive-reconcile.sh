@@ -754,6 +754,51 @@ record_cleanup_exception() { # <id> <incarnation> <reason>
   fi
 }
 
+# The producer has not started a worker. This narrower proof than ordinary
+# landed-work cleanup never prunes a branch, trusts a remote tracking ref, or
+# treats an unknown commit as scratch. Treehouse still owns the guarded return.
+reconcile_unhanded_treehouse_lease() { # <project> <token> <recorded-path> <task>
+  local project=$1 token=$2 recorded=$3 task=$4 lock
+  lock=$(fm_treehouse_project_lock_path "$project") || return 1
+  fm_lock_try_acquire "$lock" || return 1
+  # The scan's surrounding subshell already holds the task locks. Take the
+  # project lock nonblocking because spawn acquires it before the meta lock.
+  if reconcile_unhanded_treehouse_lease_locked "$project" "$token" "$recorded" "$task"; then
+    fm_lock_release "$lock"
+  else
+    fm_lock_release "$lock"
+    return 1
+  fi
+}
+
+reconcile_unhanded_treehouse_lease_locked() { # <project> <token> <recorded-path> <task>
+  local project=$1 token=$2 recorded=$3 task=$4 lease lease_id wt root common dirt head
+  lease=$(fm_treehouse_vessel_lease "$project" "$token" idle) || return 1
+  [ -n "$lease" ] || return 0
+  IFS=$'\t' read -r lease_id wt <<< "$lease"
+  [ -z "$recorded" ] || [ "$recorded" = "$wt" ] || return 1
+  root=$(cd "${TREEHOUSE_ROOT:?}" && pwd -P) || return 1
+  [ "$(cd "$wt" && pwd -P)" = "$wt" ] || return 1
+  case "$wt" in "$root"/*) ;; *) return 1 ;; esac
+  fm_treehouse_pool_slot "$project" "$wt" || return 1
+  fm_treehouse_slot_owner_state "$wt" "$task"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) ;;
+    mine) [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" = "$FM_HOME" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir) || return 1
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" = "$common" ] || return 1
+  dirt=$(git -C "$wt" status --porcelain --untracked-files=all --ignored) || return 1
+  [ -z "$dirt" ] || return 1
+  head=$(git -C "$wt" rev-parse --verify HEAD) || return 1
+  git -C "$project" merge-base --is-ancestor "$head" HEAD || return 1
+  (cd "$project" && treehouse return --if-lease-holder "fm-$token" --if-lease-id "$lease_id" "$wt" </dev/null) || return 1
+  lease=$(fm_treehouse_vessel_lease "$project" "$token") || return 1
+  [ -z "$lease" ] || return 1
+  fm_treehouse_slot_owner_release "$wt" "$task"
+}
+
 reconcile_unpublished_allocation() ( # <id> <receipt>
 
   local id=$1 receipt=$2 data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
@@ -802,21 +847,36 @@ reconcile_unpublished_allocation() ( # <id> <receipt>
       record_cleanup_exception "$id" "$receipt" "ambiguous vessel launch allocation receipt $receipt"
       return
     fi
+    case "$phase" in
+      staged|reserving|reserved) ;;
+      *) record_cleanup_exception "$id" "$receipt" "launch stopped at $phase; preserve the working copy ${worktree:-not yet recorded} and reconcile $receipt"
+        return ;;
+    esac
+    local alternate='' projects
     if [ "$phase" != staged ]; then
-      record_cleanup_exception "$id" "$receipt" "launch stopped at $phase; preserve the working copy ${worktree:-not yet recorded} and reconcile $receipt"
-      return
+      alternate="fm-$id"
+      projects=$(cd "${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}" && pwd -P) || projects=
+      if [ -z "$projects" ] || [ "$(cd "$project" && pwd -P)" != "$project" ] \
+        || [[ "$project" != "$projects/"* ]] || [ -z "${TREEHOUSE_ROOT:-}" ]; then
+        record_cleanup_exception "$id" "$receipt" "cannot prove $project is an owned vessel project; preserving the lease"
+        return
+      fi
     fi
     if [ -z "${FM_ANCHOR:-}" ] || [ -z "${TMUX_TMPDIR:-}" ] \
       || [ "$socket" != "$TMUX_TMPDIR/tmux-$(id -u)/default" ] \
       || ! [[ "$token" =~ ^[0-9a-f]{32}$ ]] || ! fm_backend_endpoint_atom_valid "$session" \
       || ! fm_backend_source tmux \
-      || ! fm_backend_tmux_reap_staged "$socket" "$session" "fm-staged-$token" "$token"; then
+      || ! fm_backend_tmux_reap_staged "$socket" "$session" "fm-staged-$token" "$token" "$alternate"; then
       record_cleanup_exception "$id" "$receipt" "cannot verify staged endpoint release from $receipt on ${socket:-unknown socket}"
+      return
+    fi
+    if [ "$phase" != staged ] && ! reconcile_unhanded_treehouse_lease "$project" "$token" "$worktree" "$id"; then
+      record_cleanup_exception "$id" "$receipt" "cannot verify safe return of the Treehouse lease for $id in $project; preserve the copy ${worktree:-identified by the lease in $receipt} and inspect its files, commits and lease owner"
       return
     fi
     rm -- "$receipt" || return 1
     rm -f -- "$OUTCOME_DIR/$id.cleanup-exception"
-    printf 'Reclaimed staged vessel endpoint for %s\n' "$id"
+    printf 'Reconciled unhanded vessel launch allocation for %s\n' "$id"
     return
   fi
   phase=$(fm_task_tmp_owner_phase "$STATE" "$id") || phase=unreadable

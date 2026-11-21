@@ -1361,13 +1361,26 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 TEARDOWN_TEMP_OWNER="$STATE/$ID.task-tmp-owner"
 TEARDOWN_LAUNCH_ALLOCATION="$STATE/$ID.launch-allocation"
+TEARDOWN_LEASE_TOKEN=''
+TEARDOWN_LEASE_ID=''
+TEARDOWN_LEASE_RETURNING=0
 if [ -e "$TEARDOWN_LAUNCH_ALLOCATION" ] || [ -L "$TEARDOWN_LAUNCH_ALLOCATION" ]; then
   if ! fm_backlog_record_present "$TEARDOWN_LAUNCH_ALLOCATION" 'vessel launch allocation' "$STATE" \
-    || ! grep -Fxq 'phase=claimed' "$TEARDOWN_LAUNCH_ALLOCATION" \
+    || ! grep -Exq 'phase=(claimed|handed-off|returning)' "$TEARDOWN_LAUNCH_ALLOCATION" \
     || ! grep -Fxq -- "worktree=$WT" "$TEARDOWN_LAUNCH_ALLOCATION" \
     || ! grep -Fxq -- "project=$PROJ" "$TEARDOWN_LAUNCH_ALLOCATION"; then
     echo "REFUSED: $TEARDOWN_LAUNCH_ALLOCATION does not agree with $META; reconcile the launch before cleanup" >&2
     exit 1
+  fi
+  if grep -Fxq 'phase=returning' "$TEARDOWN_LAUNCH_ALLOCATION"; then
+    TEARDOWN_LEASE_RETURNING=1
+  fi
+  if grep -Exq 'phase=(handed-off|returning)' "$TEARDOWN_LAUNCH_ALLOCATION"; then
+    TEARDOWN_LEASE_TOKEN=$(awk -F= '$1 == "token" {print $2}' "$TEARDOWN_LAUNCH_ALLOCATION")
+    if ! [[ "$TEARDOWN_LEASE_TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
+      echo "REFUSED: invalid Treehouse lease token in $TEARDOWN_LAUNCH_ALLOCATION" >&2
+      exit 1
+    fi
   fi
 fi
 TEARDOWN_TEMP_OWNED=0
@@ -1408,6 +1421,11 @@ elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+if [ "$RESUME_CLEANUP" = 1 ] && { [ -n "$TEARDOWN_LEASE_TOKEN" ] || [ -n "${FM_ANCHOR:-}" ]; } \
+  && { [ -n "$(fm_meta_get "$META" remote_host)" ] || { [ "$KIND" = ship ] && [ "$MODE" != local-only ]; }; }; then
+  echo "REFUSED: automatic vessel cleanup cannot verify remote resources for $ID (delivery $MODE); reconcile remote ownership before retrying" >&2
+  exit 1
+fi
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
@@ -2116,12 +2134,16 @@ cleanup_stale_lock_for_safety_check() {
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} token=${5:-} lease_id=${6:-}
   local out lock attempt=0 max_retries lock_desc
+  local -a return_flags=(--force)
+  if [ -n "$token" ]; then
+    return_flags=(--if-lease-holder "fm-$token" --if-lease-id "$lease_id")
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return "${return_flags[@]}" "$dir" </dev/null ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -2146,7 +2168,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return "${return_flags[@]}" "$dir" </dev/null ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -2173,7 +2195,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return "${return_flags[@]}" "$dir" </dev/null ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -3781,6 +3803,19 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+if [ -n "$TEARDOWN_LEASE_TOKEN" ] && teardown_owns_worktree; then
+  lease_info=$(fm_treehouse_vessel_lease "$PROJ" "$TEARDOWN_LEASE_TOKEN") || exit 1
+  IFS=$'\t' read -r TEARDOWN_LEASE_ID lease_worktree <<< "$lease_info"
+  if [ -z "$lease_info" ] && [ "$TEARDOWN_LEASE_RETURNING" = 1 ] && [ "$RESUME_CLEANUP" = 1 ]; then
+    # Pending close plus the exact stopped endpoint is required above. A
+    # missing token after a successful inventory may mean return completed;
+    # never inspect/reset the old path because the pool may have reassigned it.
+    TEARDOWN_SLOT_REASSIGNED=1
+  elif [ -z "$TEARDOWN_LEASE_ID" ] || [ "$lease_worktree" != "$WT" ]; then
+    echo "REFUSED: the current Treehouse lease cannot be matched to $WT for $ID; preserve the local records and inspect its lease" >&2
+    exit 1
+  fi
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -4269,10 +4304,27 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   wt_pool_slot=0
   fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+  if [ -n "$TEARDOWN_LEASE_TOKEN" ] && [ "$TEARDOWN_LEASE_RETURNING" = 0 ]; then
+    returning=$(umask 077; mktemp "$TEARDOWN_LAUNCH_ALLOCATION.XXXXXX") || exit 1
+    if ! { awk '$0 == "phase=handed-off" {$0 = "phase=returning"} {print}' \
+      "$TEARDOWN_LAUNCH_ALLOCATION" > "$returning" && fm_backlog_atomic_transition publish \
+      "$returning" "$TEARDOWN_LAUNCH_ALLOCATION" 'vessel lease return receipt' "$STATE"; }; then
+      rm -f -- "$returning"
+      exit 1
+    fi
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    "$TEARDOWN_LEASE_TOKEN" "$TEARDOWN_LEASE_ID" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  if [ -n "$TEARDOWN_LEASE_TOKEN" ]; then
+    lease_info=$(fm_treehouse_vessel_lease "$PROJ" "$TEARDOWN_LEASE_TOKEN") || exit 1
+    if [ -n "$lease_info" ]; then
+      echo "REFUSED: Treehouse did not release the recorded lease for $ID; retaining its records" >&2
+      exit 1
+    fi
+  fi
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot

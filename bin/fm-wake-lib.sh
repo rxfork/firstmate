@@ -2118,6 +2118,25 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Treehouse is the authoritative holder inventory. An empty match is only an
+# absence proof after a successful, complete read of the selected project pool.
+fm_treehouse_vessel_lease() { # <project> <token> [idle] -> lease id, tab, path, or empty
+  local inventory holder="fm-$2" mode=${3:-}
+  [[ "$2" =~ ^[0-9a-f]{32}$ ]] || return 1
+  inventory=$(cd "$1" && treehouse status --json) || return 1
+  jq -r --arg holder "$holder" --arg mode "$mode" '
+    if type != "array" or any(.[]; type != "object" or (.path|type) != "string")
+    then error("unreadable Treehouse inventory") else . end
+    | map(select(.lease_holder == $holder))
+    | if length == 0 then empty
+      elif length == 1 and (.[0].lease_id | type == "string" and test("^[0-9a-f]{32}$"))
+      then .[0]
+        | if $mode == "idle" and (.status != "leased" or .detached != true or .processes != [])
+          then error("Treehouse lease is not idle and detached") else . end
+        | [.lease_id, .path] | join("\t")
+      else error("ambiguous Treehouse lease") end' <<< "$inventory"
+}
+
 # Vessel temp allocations are private to the physical state directory. The
 # producer writes staged before mkdir, then handed-off before publishing meta
 # or starting a worker. With missing meta, only staged is reclaimable.

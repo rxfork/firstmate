@@ -135,23 +135,26 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> [allocatio
 # Reap a never-handed-off shell by its provider-side token, on the exact
 # vessel socket. Recheck the token in the server command that does the close.
 # An unavailable server or ambiguous/untagged window is not proof of absence.
-fm_backend_tmux_reap_staged() {  # <socket> <session> <staged-window> <token>
-  local socket=$1 session=$2 window=$3 token=$4 rows row name wid live_token panes found='' inventory
+fm_backend_tmux_reap_staged() {  # <socket> <session> <staged-window> <token> [renamed-window]
+  local socket=$1 session=$2 window=$3 token=$4 alternate=${5:-} rows row name wid live_token panes found='' inventory
+  local found_name=''
   [ -S "$socket" ] && [ -O "$socket" ] && [ ! -L "$socket" ] || return 1
   inventory='#{window_id}|#{@fm-task-allocation}|#{window_panes}|#{window_name}'
   rows=$(tmux -S "$socket" list-windows -t "=$session" -F "$inventory") || return 1
   while IFS= read -r row; do
     IFS='|' read -r wid live_token panes name <<< "$row"
     [ "$name" = "$window" ] || [ "$live_token" = "$token" ] || continue
-    if [ "$name" != "$window" ] || [ -n "$found" ] || [ "$live_token" != "$token" ] \
+    if { [ "$name" != "$window" ] && [ "$name" != "$alternate" ]; } \
+      || [ -n "$found" ] || [ "$live_token" != "$token" ] \
       || [ "$panes" != 1 ] || ! [[ "$wid" =~ ^@[0-9]+$ ]]; then
       return 1
     fi
     found=$wid
+    found_name=$name
   done <<< "$rows"
   [ -n "$found" ] || return 0
   tmux -S "$socket" if-shell -F -t "$found" \
-    "#{&&:#{==:#{window_name},$window},#{&&:#{==:#{@fm-task-allocation},$token},#{==:#{window_panes},1}}}" \
+    "#{&&:#{==:#{window_name},$found_name},#{&&:#{==:#{@fm-task-allocation},$token},#{==:#{window_panes},1}}}" \
     "kill-window -t $found" || return 1
   rows=$(tmux -S "$socket" list-windows -t "=$session" -F "$inventory") || return 1
   while IFS= read -r row; do
