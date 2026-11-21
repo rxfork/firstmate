@@ -26,7 +26,7 @@
 # Terminal-only escalation prompts use SIGTERM [Y/n], then SIGKILL [y/N].
 # Noninteractive callers never authorize signals implicitly.
 # status lists the local scoped process facts.
-# init/run discover repositories under the anchor, skipping .firstmate and
+# init/run discover repositories under the anchor, skipping dot-directories and
 # repository contents, and clone local main (or master) into the projects path
 # only when missing. Repositories with neither branch warn and skip.
 # local points at the source; origin retains its origin URL.

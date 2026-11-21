@@ -384,7 +384,7 @@ def provision_projects(anchor, record):
             else [
                 name
                 for name in directories
-                if name != ".firstmate" and not (source / name).is_symlink()
+                if not name.startswith(".") and not (source / name).is_symlink()
             ]
         )
         if not is_repo:

@@ -732,6 +732,9 @@ vessel_projects_clone_origins_only_when_missing() (
   git -c core.hooksPath=/dev/null -C "$anchor/team/repo" worktree add -q --detach "$anchor/.treehouse/.treehouse/repo/1/repo" main
   git -c core.hooksPath=/dev/null -C "$anchor/team/repo" worktree add -q --detach "$anchor/linked-project" main
   ln -s "$anchor/other" "$anchor/linked"
+  mkdir -p "$anchor/.scratch/stale-repo"
+  printf 'gitdir: %s\n' "$TMP_ROOT/missing-gitdir" > "$anchor/.scratch/stale-repo/.git"
+  git clone -q "$origin" "$anchor/team/.cache/repo"
   git -C "$anchor/team/repo" branch other
   mv "$anchor/team/repo/.git/objects" "$TMP_ROOT/borrowed-objects"
   mkdir -p "$anchor/team/repo/.git/objects/info"
@@ -744,6 +747,7 @@ vessel_projects_clone_origins_only_when_missing() (
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
   [ ! -e "$FM_PROJECTS_OVERRIDE/.treehouse" ] && [ ! -e "$FM_PROJECTS_OVERRIDE/linked-project" ] || fail 'discovery cloned linked worktrees as additional projects'
+  [ ! -e "$FM_PROJECTS_OVERRIDE/.scratch" ] && [ ! -e "$FM_PROJECTS_OVERRIDE/team/.cache" ] || fail 'discovery entered hidden directories'
   for project in team/repo other/repo separate; do
     expected='from origin'
     [ "$project" != team/repo ] || expected='from local main'
