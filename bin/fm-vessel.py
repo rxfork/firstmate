@@ -555,8 +555,17 @@ def prepare_source(
     if not record["anchored"] and not retry:
         fail("vessel is not available for this destination")
     check_payload(anchor, record)
-    receipt = Recovery(anchor, record, lock_fd).receipt
-    if receipt and receipt["phase"] != "complete":
+    recovery = Recovery(anchor, record, lock_fd)
+    receipt = recovery.receipt
+    if (
+        receipt
+        and receipt["phase"] != "complete"
+        and not (
+            retry
+            and record.get("handoff_id")
+            and receipt.get("handoff_id") == record["handoff_id"]
+        )
+    ):
         fail("finish local fullstop/resume recovery before sailing")
     record = dict(record)
     record.update(
@@ -567,7 +576,15 @@ def prepare_source(
         known_harbors=merge_harbors(known_harbors(record), known, [destination]),
     )
     write_record(anchor, record)
-    return {"record": record, **stop_vessel(anchor, record, approved, lock_fd=lock_fd)}
+    if any(recovery.state.glob("*.meta")):
+        recovery.begin_stop(handoff_id=record["handoff_id"])
+    else:
+        recovery = None
+    result = stop_vessel(anchor, record, approved, recovery, lock_fd=lock_fd)
+    if result["stopped"] and recovery is not None:
+        recovery.receipt["shutdown"] = True
+        recovery.save()
+    return {"record": record, **result}
 
 
 def commit_source(anchor, record, destination):
@@ -609,8 +626,9 @@ def check_receiver(record, source, local):
         fail("inactive cache is not an authoritative source for this destination")
 
 
-def activate_payload(anchor, record):
+def activate_payload(anchor, record, lock_fd):
     check_payload(anchor, record)
+    Recovery(anchor, record, lock_fd, arrival=True)
     Path(record["options"]["TMUX_TMPDIR"]).mkdir(
         parents=True, exist_ok=True, mode=0o700
     )
@@ -630,7 +648,6 @@ def rsync_payload(anchor, record, source, destination):
             ".lock",
             ".lock-session",
             ".lock-session.prev",
-            ".vessel-recovery.json",
         )
     )
     filters = [
@@ -791,7 +808,7 @@ def peer(anchor, operation):
             if record == completed:
                 check_payload(anchor, record)
             elif record == expected and record["harbor"] == local:
-                record = activate_payload(anchor, record)
+                record = activate_payload(anchor, record, lock_fd)
             else:
                 fail("destination changed before activation; retry sailing")
             return {"here": local, "record": record}
@@ -900,7 +917,7 @@ def sail(anchor, source, expected):
     local = here()
     if source:
         source = harbor_name(source)
-    with anchor_lock(anchor):
+    with anchor_lock(anchor) as lock_fd:
         record = read_record(anchor) if vessel_path(anchor, ".json").exists() else None
         vessel = vessel_path(anchor)
         if (
@@ -995,7 +1012,7 @@ def sail(anchor, source, expected):
             expected_commit.pop("sailing_to")
             if committed != expected_commit:
                 fail("origin did not acknowledge arrival")
-            incoming = activate_payload(anchor, incoming)
+            incoming = activate_payload(anchor, incoming, lock_fd)
         except (
             OSError,
             ValueError,
@@ -1156,7 +1173,12 @@ def push(anchor, target, expected):
             known_harbors(candidate) if candidate else [],
             [host, destination],
         )
-        record["handoff_id"] = str(uuid.uuid4())
+        if (
+            record["anchored"]
+            or record.get("sailing_to") != destination
+            or not record.get("handoff_id")
+        ):
+            record["handoff_id"] = str(uuid.uuid4())
         record["known_harbors"] = known
         write_record(anchor, record)
         incoming = remote(

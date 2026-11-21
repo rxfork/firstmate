@@ -37,7 +37,7 @@ def identity(pid):
 
 
 class Recovery:
-    def __init__(self, anchor, record, lock_fd):
+    def __init__(self, anchor, record, lock_fd, arrival=False):
         self.options = record["options"]
         self.env = vessel_environment(anchor, record)
         self.env["FM_VESSEL_RECOVERY_FD"] = str(lock_fd)
@@ -67,11 +67,27 @@ class Recovery:
                 raise ValueError(
                     f"{self.path}: corrupt fullstop receipt: {exc}"
                 ) from exc
-            if body["owner"] != self.owner or body["socket"] != str(self.socket):
+            transferred = (
+                arrival
+                and record.get("handoff_id")
+                and body.get("handoff_id") == record["handoff_id"]
+                and body["owner"]
+                == [self.owner[0], record["last_known_harbor"], self.owner[2]]
+            )
+            if arrival and not transferred and body["phase"] == "complete":
+                self.path.unlink()
+                return
+            if not transferred and (
+                body["owner"] != self.owner or body["socket"] != str(self.socket)
+            ):
                 raise ValueError(
                     f"{self.path}: fullstop receipt belongs to a different vessel, harbor or socket"
                 )
             self.receipt = body
+            if transferred:
+                self.adopt_arrival()
+            elif arrival and body.get("handoff_id") != record.get("handoff_id"):
+                raise ValueError("recovery receipt belongs to another handoff")
 
     def save(self):
         fd, name = tempfile.mkstemp(prefix=".vessel-recovery.", dir=self.state)
@@ -238,7 +254,32 @@ class Recovery:
             return True
         raise ValueError("cannot verify the vessel's no-mistakes daemon status")
 
-    def begin_stop(self):
+    def adopt_arrival(self):
+        receipt = self.receipt
+        tasks = receipt["tasks"]
+        if (
+            receipt["phase"] != "stopping"
+            or not receipt["shutdown"]
+            or self.server() is not None
+            or set(tasks) != {path.stem for path in self.state.glob("*.meta")}
+        ):
+            raise ValueError("arrival does not have a verified worker shutdown")
+        for task, entry in tasks.items():
+            meta = self.metadata(task)
+            current = self.task_identity(task, meta)
+            # Rsync changes the worktree inode, not the rest of its task identity.
+            if (
+                entry["outcome"] not in ("stopped", "parked")
+                or entry["generation"] != meta.get("spawn_gen")
+                or {**current, "directory": entry["identity"]["directory"]}
+                != entry["identity"]
+            ):
+                raise ValueError(f"{task}: arrival does not match the stopped worker")
+            entry["identity"] = current
+        receipt.update(owner=self.owner, socket=str(self.socket), server=None)
+        self.save()
+
+    def begin_stop(self, handoff_id=None):
         previous = self.receipt
         if previous and previous["phase"] == "stopping":
             return
@@ -294,6 +335,8 @@ class Recovery:
             "token": uuid.uuid4().hex,
             "restart_validation": self.daemon_running(),
         }
+        if handoff_id is not None:
+            self.receipt["handoff_id"] = handoff_id
         self.save()
 
     def check_original_server(self, server):

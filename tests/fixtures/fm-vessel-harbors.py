@@ -94,12 +94,17 @@ elif operation in ("control", "watch", "daemon", "tmux"):
     if operation == "control":
         assert args == ["fixture-worker", "exit"]
         os.kill(int((world / "worker.pid").read_text()), signal.SIGTERM)
+        print("stopped fixture-worker fixture")
     elif operation == "tmux":
         assert args[0] == "-S" and args[1].startswith(
             str(Path(os.environ["FM_HOME"]) / "tmux")
         )
-        if args[2] == "list-windows":
-            print("firstmate:fixture-worker")
+        if args[2] == "display-message":
+            print((world / "tmux.pid").read_text().strip())
+        elif args[2] == "list-panes" and "#{window_id}" in args[-1]:
+            pid = (world / "worker.pid").read_text().strip()
+            cwd = Path(os.environ["TREEHOUSE_ROOT"]) / "fixture-worker"
+            print(f"firstmate:fm-fixture-worker\t@1\t%1\t{pid}\t{cwd}")
         elif args[2] == "list-panes":
             print(
                 (world / "tmux.pid").read_text().strip()
@@ -109,10 +114,13 @@ elif operation in ("control", "watch", "daemon", "tmux"):
             )
         elif args[2] == "kill-server":
             os.kill(int((world / "tmux.pid").read_text()), signal.SIGTERM)
+            Path(args[1]).unlink()
         else:
             raise AssertionError("unexpected tmux stop operation")
     elif operation == "daemon":
-        assert args == ["daemon", "stop"]
+        assert args in (["daemon", "stop"], ["daemon", "status"])
+        if args[1] == "status":
+            print("not running")
     else:
         assert args == ["--stop"]
 elif operation == "rsync":

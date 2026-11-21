@@ -640,6 +640,8 @@ sailing_stops_registered_work_without_discarding_state() (
   bash "$ANCHOR_CLI" init --anchor "$FM_ANCHOR" --agent pi >/dev/null
   mkdir -p "$FM_FIXTURE_WORLD/source-core/bin" "$TMUX_TMPDIR/tmux-$(id -u)"
   cp "$ROOT/bin/fm-anchor.sh" "$ROOT/bin/fm-vessel.py" "$ROOT/bin/"fm_{raise_anchor,vessel_recovery}.py "$FM_FIXTURE_WORLD/source-core/bin/"
+  printf '#!/bin/sh\nprintf "state: parked · fixture\\n"\n' > "$FM_FIXTURE_WORLD/source-core/bin/fm-crew-state.sh"
+  chmod +x "$FM_FIXTURE_WORLD/source-core/bin/fm-crew-state.sh"
   for entry in 'fm-control.sh control' 'fm-watch-arm.sh watch'; do
     read -r name operation <<< "$entry"
     printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-harbors.py" %s "$@"\n' "$ROOT" "$operation" > "$FM_FIXTURE_WORLD/source-core/bin/$name"
@@ -661,16 +663,31 @@ sailing_stops_registered_work_without_discarding_state() (
   trap 'kill "$worker" "$server" 2>/dev/null || true; wait "$worker" "$server" 2>/dev/null || true' EXIT
   for _ in $(seq 1 100); do [ ! -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || break; sleep 0.02; done
   [ -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || fail 'private socket fixture did not start'
-  printf 'kind=ship\nwindow=firstmate:fixture-worker\n' > "$FM_STATE_OVERRIDE/fixture-worker.meta"
-  printf 'uncommitted work\n' > "$FM_PROJECTS_OVERRIDE/dirty"
+  local task=fixture-worker project="$FM_PROJECTS_OVERRIDE/project"
+  fm_git_init_commit "$project"
+  git -C "$project" worktree add --quiet -b "$task" "$TREEHOUSE_ROOT/$task"
+  mkdir -p "$FM_DATA_OVERRIDE/$task"
+  printf 'original instructions\n' > "$FM_DATA_OVERRIDE/$task/brief.md"
+  printf 'kind=ship\nwindow=firstmate:fm-%s\nworktree=%s\nproject=%s\nharness=pi\nmode=local-only\nbranch=%s\n' \
+    "$task" "$TREEHOUSE_ROOT/$task" "$project" "$task" > "$FM_STATE_OVERRIDE/$task.meta"
+  printf 'uncommitted work\n' > "$TREEHOUSE_ROOT/$task/file"
   activate_harbor laptop
-  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null || fail 'registered work did not stop before transfer'
+  touch "$FM_FIXTURE_WORLD/fail-copy"
+  if bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null 2>&1; then
+    fail 'failed copy activated a destination with registered work'
+  fi
+  rm "$FM_FIXTURE_WORLD/fail-copy"
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null || fail 'sail retry lost the verified worker stop'
   wait "$worker" 2>/dev/null || true
   wait "$server" 2>/dev/null || true
   trap - EXIT
   jq -se 'any(.operation == "control" and .args == ["fixture-worker", "exit"]) and any(.operation == "watch" and .args == ["--stop"]) and any(.operation == "daemon" and .args == ["daemon", "stop"]) and any(.operation == "tmux" and .args[2] == "kill-server")' "$FM_FIXTURE_WORLD/stop-calls" >/dev/null || fail 'stop did not use the existing scoped tool interfaces'
-  [ "$(< "$FM_PROJECTS_OVERRIDE/dirty")" = 'uncommitted work' ] && [ -f "$FM_STATE_OVERRIDE/fixture-worker.meta" ] || fail 'stopping discarded work or task records'
-  pass 'sailing stops registered workers, monitoring, validation and its private tmux server without cleanup of working state'
+  [ "$(< "$TREEHOUSE_ROOT/$task/file")" = 'uncommitted work' ] && [ -f "$FM_STATE_OVERRIDE/$task.meta" ] || fail 'stopping discarded work or task records'
+  bash "$ANCHOR_CLI" fullstop --anchor "$FM_ANCHOR" >/dev/null || fail 'destination did not recognize the stopped worker'
+  bash "$ANCHOR_CLI" resume --anchor "$FM_ANCHOR" || fail 'destination did not accept the transferred recovery receipt'
+  [ ! -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ] || fail 'resume launched deliberately parked work'
+  jq -se '[.[] | select(.operation == "control")] | length == 1' "$FM_FIXTURE_WORLD/stop-calls" >/dev/null || fail 'retry stopped the worker more than once'
+  pass 'sailing stops registered workers and leaves the transferred task recoverable'
 )
 
 unavailable_sources_report_the_payload_reason() (
