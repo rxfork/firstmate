@@ -68,6 +68,7 @@ SH
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-vessel-lock-lib.sh" "$fake/bin/fm-vessel-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
@@ -129,6 +130,9 @@ fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
+  # The fixture never starts an endpoint or a subprocess in its temp folder.
+  printf '#!/bin/bash\nexit 0\n' > "$fake/bin/lsof"
+  chmod +x "$fake/bin/lsof"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -155,11 +159,30 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
-    || fail "teardown exited non-zero with a valid tasktmp"
+  local out
+  out=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || fail "teardown exited non-zero with a valid tasktmp: $out"
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
+}
+
+test_teardown_releases_handed_off_vessel_temp() {
+  local id=td-vessel-temp-z5 fake dir receipt out
+  fake=$(make_fake_root "$id" "$TMP_ROOT/unused")
+  dir="$(cd "$fake/state" && pwd -P)/$id.task-tmp"
+  receipt="$fake/state/$id.task-tmp-owner"
+  mkdir -p -- "$dir/gotmp"
+  printf 'leftover\n' > "$dir/gotmp/build-artifact"
+  printf 'handed-off=%s\n' "$dir" > "$receipt"
+  awk -v dir="$dir" '/^tasktmp=/ {print "tasktmp=" dir; next} {print}' \
+    "$fake/state/$id.meta" > "$fake/state/$id.meta.new"
+  mv -- "$fake/state/$id.meta.new" "$fake/state/$id.meta"
+  out=$(PATH="$fake/bin:$PATH" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" 2>&1) \
+    || fail "vessel temp allocation teardown failed: $out"
+  [ ! -e "$dir" ] || fail 'task temp directory survived teardown'
+  [ ! -e "$receipt" ] || fail 'task temp receipt survived teardown'
+  pass 'teardown releases verified vessel temp and its durable receipt'
 }
 
 test_teardown_skips_gracefully_without_tasktmp() {
@@ -183,6 +206,7 @@ SH
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-vessel-lock-lib.sh" "$fake/bin/fm-vessel-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -264,5 +288,6 @@ test_teardown_skips_gracefully_when_dir_missing() {
 }
 
 test_teardown_removes_tasktmp_dir
+test_teardown_releases_handed_off_vessel_temp
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing

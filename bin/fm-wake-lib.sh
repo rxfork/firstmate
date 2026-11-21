@@ -2118,6 +2118,22 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Vessel temp allocations are private to the physical state directory. The
+# producer writes staged before mkdir, then handed-off before publishing meta
+# or starting a worker. With missing meta, only staged is reclaimable.
+fm_task_tmp_owner_phase() {  # <state> <id>
+  local owner="$1/$2.task-tmp-owner" expected phase
+  fm_backlog_record_present "$owner" "task temp allocation receipt" "$1" || return 1
+  expected=$(cd "$1" && pwd -P) || return 1
+  expected="$expected/$2.task-tmp"
+  phase=$(< "$owner") || return 1
+  case "$phase" in
+    "staged=$expected") printf '%s\n' staged ;;
+    "handed-off=$expected") printf '%s\n' handed-off ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

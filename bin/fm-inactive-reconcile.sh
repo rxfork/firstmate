@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# fm-inactive-reconcile.sh - bounded reconciliation of suspicious inactive terminal outcomes.
+# fm-inactive-reconcile.sh - bounded reconciliation of inactive outcomes and recorded cleanup.
+# The ordinary scan also hands interrupted closes and failed Orca launches back
+# to fm-teardown, before taking the per-task lock (teardown owns lock order).
+# Backlog-only replay uses the same locks and validator as bootstrap.
+# No endpoint or branch inventory is inferred from names. Refusal notices are
+# deduplicated by task incarnation and first diagnostic line.
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
@@ -139,6 +144,10 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -711,6 +720,147 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
+reconcile_recorded_cleanup() { # <id> <meta> <timeout>
+  local id=$1 meta=$2 timeout=$3 out rc=0 reason receipt
+  out=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-teardown.sh" "$id" --resume-cleanup 2>&1) || rc=$?
+  receipt="$OUTCOME_DIR/$id.cleanup-exception"
+  case "$rc" in
+    0|4)
+      rm -f -- "$receipt"
+      [ -z "$out" ] || printf '%s\n' "$out"
+      return 0 ;;
+    124) return 3 ;;
+  esac
+  reason=$(printf '%s\n' "$out" | awk '/^(REFUSED|error):/{print; exit}')
+  reason=${reason:-cleanup retry exited $rc; inspect $meta}
+  record_cleanup_exception "$id" "$(meta_incarnation "$meta")" "$reason"
+}
+
+record_cleanup_exception() { # <id> <incarnation> <reason>
+  local id=$1 reason=$3 fingerprint receipt="$OUTCOME_DIR/$1.cleanup-exception" tmp
+  fingerprint=$(sha256_text "$2|$id|$reason") || return 1
+  if [ ! -L "$receipt" ] && [ -f "$receipt" ] \
+    && [ "$(< "$receipt")" = "$fingerprint" ]; then
+    return 0
+  fi
+  publish_actionable "cleanup-exception:$fingerprint" "$id: $reason" || {
+    [ "$?" -eq 1 ] || return 1
+  }
+  tmp=$(mktemp "$OUTCOME_DIR/.cleanup-exception.XXXXXX") || return 1
+  if ! { printf '%s\n' "$fingerprint" > "$tmp" && mv -f -- "$tmp" "$receipt"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+reconcile_unpublished_allocation() ( # <id> <receipt>
+
+  local id=$1 receipt=$2 data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
+  local config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config} meta="$STATE/$1.meta"
+  local spawn_lock="$STATE/.spawn-$1.lock" control="$STATE/.control-$1.lock"
+  local lock phase dir socket session token project worktree
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_try_acquire "$spawn_lock" || return 0
+  trap 'fm_lock_release "$spawn_lock"' EXIT
+  fm_lock_try_acquire "$control" || return 0
+  trap 'fm_lock_release "$control"; fm_lock_release "$spawn_lock"' EXIT
+  fm_lock_try_acquire "$lock" || return 0
+  trap 'fm_lock_release "$lock"; fm_lock_release "$control"; fm_lock_release "$spawn_lock"' EXIT
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ ! -e "$STATE/$id.backlog-close" ] && [ ! -L "$STATE/$id.backlog-close" ] || return 0
+  if [ -z "${FM_ANCHOR:-}" ]; then
+    [ ! -e "$STATE/.vessel-recovery.json" ] && [ ! -L "$STATE/.vessel-recovery.json" ] || return 0
+  fi
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 0
+  if ! fm_backlog_transition_applies "$config" "$data" ship; then
+    record_cleanup_exception "$id" "$receipt" "cannot read authoritative task ownership for $receipt; reconcile the backlog before release"
+    return
+  fi
+  if fm_backlog_row_probe "$data" "$id"; then
+    if [ "${FM_BACKLOG_ROW_STATE%% *}" != queued ]; then
+      record_cleanup_exception "$id" "$receipt" "resource allocation has no metadata but backlog state is $FM_BACKLOG_ROW_STATE"
+      return
+    fi
+  elif [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+    record_cleanup_exception "$id" "$receipt" "cannot read task ownership for $receipt: $FM_BACKLOG_ROW_ERROR"
+    return
+  fi
+  if [ "$receipt" = "$STATE/$id.launch-allocation" ]; then
+    if ! fm_backlog_record_present "$receipt" 'vessel launch allocation' "$STATE"; then
+      record_cleanup_exception "$id" "$receipt" "invalid vessel launch allocation receipt $receipt"
+      return
+    fi
+    phase=$(record_value "$receipt" phase)
+    socket=$(record_value "$receipt" socket)
+    session=$(record_value "$receipt" session)
+    token=$(record_value "$receipt" token)
+    project=$(record_value "$receipt" project)
+    worktree=$(record_value "$receipt" worktree)
+    if ! printf '%s\n' "phase=$phase" "socket=$socket" "session=$session" \
+      "token=$token" "project=$project" "worktree=$worktree" | cmp -s -- "$receipt" -; then
+      record_cleanup_exception "$id" "$receipt" "ambiguous vessel launch allocation receipt $receipt"
+      return
+    fi
+    if [ "$phase" != staged ]; then
+      record_cleanup_exception "$id" "$receipt" "launch stopped at $phase; preserve the working copy ${worktree:-not yet recorded} and reconcile $receipt"
+      return
+    fi
+    if [ -z "${FM_ANCHOR:-}" ] || [ -z "${TMUX_TMPDIR:-}" ] \
+      || [ "$socket" != "$TMUX_TMPDIR/tmux-$(id -u)/default" ] \
+      || ! [[ "$token" =~ ^[0-9a-f]{32}$ ]] || ! fm_backend_endpoint_atom_valid "$session" \
+      || ! fm_backend_source tmux \
+      || ! fm_backend_tmux_reap_staged "$socket" "$session" "fm-staged-$token" "$token"; then
+      record_cleanup_exception "$id" "$receipt" "cannot verify staged endpoint release from $receipt on ${socket:-unknown socket}"
+      return
+    fi
+    rm -- "$receipt" || return 1
+    rm -f -- "$OUTCOME_DIR/$id.cleanup-exception"
+    printf 'Reclaimed staged vessel endpoint for %s\n' "$id"
+    return
+  fi
+  phase=$(fm_task_tmp_owner_phase "$STATE" "$id") || phase=unreadable
+  if [ "$phase" != staged ]; then
+    record_cleanup_exception "$id" "$receipt" "cannot verify unclaimed task temp allocation ($phase); reconcile $receipt and $meta"
+    return
+  fi
+  dir="$STATE/$id.task-tmp"
+  # Staged directories never reached a worker. Only remove empty directories:
+  # unexpected contents and symlinks are recoverable exceptions, not trash.
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if [ -L "$dir" ] || [ ! -d "$dir" ] || {
+      { [ -e "$dir/gotmp" ] || [ -L "$dir/gotmp" ]; } && ! rmdir -- "$dir/gotmp" 2>/dev/null;
+    }; then
+      record_cleanup_exception "$id" "$receipt" "unexpected files in $dir; inspect them before reclaiming this task temp allocation"
+      return
+    fi
+    if ! rmdir -- "$dir" 2>/dev/null; then
+      record_cleanup_exception "$id" "$receipt" "could not remove $dir; inspect and preserve its contents before retrying"
+      return
+    fi
+  fi
+  rm -- "$receipt" || return 1
+  rm -f -- "$OUTCOME_DIR/$id.cleanup-exception"
+  printf 'Reclaimed unclaimed task temp allocation %s\n' "$dir"
+)
+
+reconcile_close_without_meta() ( # <id> <marker>
+  local id=$1 marker=$2 meta="$STATE/$1.meta" lock control="$STATE/.control-$1.lock"
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_try_acquire "$control" || return 0
+  if ! fm_lock_try_acquire "$lock"; then
+    fm_lock_release "$control"
+    return 0
+  fi
+  trap 'fm_lock_release "$lock"; fm_lock_release "$control"' EXIT
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 0
+  if fm_backlog_close_marker_replay "$STATE" "$marker" "${FM_DATA_OVERRIDE:-$FM_HOME/data}"; then
+    rm -f -- "$OUTCOME_DIR/$id.cleanup-exception"
+  else
+    record_cleanup_exception "$id" "$marker" "$FM_BACKLOG_TRANSITION_ERROR"
+  fi
+)
+
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
   lock=$(fm_meta_lock_path "$meta") || return 1
@@ -727,9 +877,17 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
 # write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
   local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+  for meta in "$STATE"/*; do
+    case "$meta" in
+      *.backlog-close)
+        id=${meta##*/}; id=${id%.backlog-close}
+        [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue ;;
+      *.task-tmp-owner|*.launch-allocation)
+        id=${meta##*/}; id=${id%.*}
+        [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue ;;
+      *.meta) id=${meta##*/}; id=${id%.meta} ;;
+      *) continue ;;
+    esac
     valid_id "$id" || continue
     case "$range" in
       after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
@@ -749,6 +907,19 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       remaining=1
     fi
     [ "$remaining" -gt 0 ] || return 3
+    if [ "$meta" = "$STATE/$id.task-tmp-owner" ] || [ "$meta" = "$STATE/$id.launch-allocation" ]; then
+      reconcile_unpublished_allocation "$id" "$meta" || return "$?"
+      continue
+    fi
+    if [ "$meta" = "$STATE/$id.backlog-close" ]; then
+      reconcile_close_without_meta "$id" "$meta" || return "$?"
+      continue
+    fi
+    if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ] \
+      || [ "$(meta_field "$meta" cleanup_recovery)" = orca ]; then
+      reconcile_recorded_cleanup "$id" "$meta" "$remaining" || return "$?"
+      continue
+    fi
     reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {
       rc=$?
       [ "$rc" -eq 3 ] && return 3
@@ -834,6 +1005,11 @@ case "$mode" in
     ;;
   _scan-locked)
     [ "$#" -eq 2 ] || exit 2
+    if [ -n "${FM_ANCHOR:-}" ]; then
+      # shellcheck source=bin/fm-vessel-lock-lib.sh
+      . "$SCRIPT_DIR/fm-vessel-lock-lib.sh" || exit 1
+      fm_vessel_guard_mutation "${BASH_SOURCE[0]}" "$@" || exit 1
+    fi
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     scan "$2"

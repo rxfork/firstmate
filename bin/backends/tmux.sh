@@ -114,16 +114,50 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
-fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
+fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> [allocation-token] -> prints window id
+  local ses=$1 wname=$2 proj_abs=$3 token=${4:-} wid
+  local tag=()
+  if [ -n "$token" ]; then
+    # The ordinary name is not evidence of ownership. Keep the producer's
+    # private token on the window itself before any lease command is sent.
+    tag=(\; set-window-option -t "=$ses:=$wname" @fm-task-allocation "$token")
+  fi
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs" "${tag[@]+"${tag[@]}"}") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
+}
+
+# Reap a never-handed-off shell by its provider-side token, on the exact
+# vessel socket. Recheck the token in the server command that does the close.
+# An unavailable server or ambiguous/untagged window is not proof of absence.
+fm_backend_tmux_reap_staged() {  # <socket> <session> <staged-window> <token>
+  local socket=$1 session=$2 window=$3 token=$4 rows row name wid live_token panes found='' inventory
+  [ -S "$socket" ] && [ -O "$socket" ] && [ ! -L "$socket" ] || return 1
+  inventory='#{window_id}|#{@fm-task-allocation}|#{window_panes}|#{window_name}'
+  rows=$(tmux -S "$socket" list-windows -t "=$session" -F "$inventory") || return 1
+  while IFS= read -r row; do
+    IFS='|' read -r wid live_token panes name <<< "$row"
+    [ "$name" = "$window" ] || [ "$live_token" = "$token" ] || continue
+    if [ "$name" != "$window" ] || [ -n "$found" ] || [ "$live_token" != "$token" ] \
+      || [ "$panes" != 1 ] || ! [[ "$wid" =~ ^@[0-9]+$ ]]; then
+      return 1
+    fi
+    found=$wid
+  done <<< "$rows"
+  [ -n "$found" ] || return 0
+  tmux -S "$socket" if-shell -F -t "$found" \
+    "#{&&:#{==:#{window_name},$window},#{&&:#{==:#{@fm-task-allocation},$token},#{==:#{window_panes},1}}}" \
+    "kill-window -t $found" || return 1
+  rows=$(tmux -S "$socket" list-windows -t "=$session" -F "$inventory") || return 1
+  while IFS= read -r row; do
+    IFS='|' read -r wid live_token panes name <<< "$row"
+    [ "$name" != "$window" ] && [ "$live_token" != "$token" ] || return 1
+  done <<< "$rows"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

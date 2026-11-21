@@ -2056,6 +2056,7 @@ spawn_abort_cleanup() {
   # that lock once for a later failure whose record was rolled back. The
   # release itself never removes another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
+    [ -z "${VESSEL_ALLOCATION:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
     fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
@@ -5067,6 +5068,27 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# A vessel temp receipt reserves an exact home-local allocation; do not let
+# a new incarnation adopt a previous failed launch's directory by task name.
+if [ -n "${FM_ANCHOR:-}" ] && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  for pending_allocation in "$STATE/$ID.task-tmp-owner" "$STATE/$ID.task-tmp" "$STATE/$ID.launch-allocation"; do
+    if [ -e "$pending_allocation" ] || [ -L "$pending_allocation" ]; then
+      echo "error: unresolved vessel allocation at $pending_allocation; allow supervision to reconcile it before dispatch" >&2
+      exit 1
+    fi
+  done
+fi
+spawn_record_vessel_allocation() {  # <phase> [working-copy]
+  local staged
+  staged=$(umask 077; mktemp "$VESSEL_ALLOCATION.XXXXXX") || return 1
+  if ! { printf '%s\n' "phase=$1" "socket=$VESSEL_SOCKET" "session=$SES" \
+    "token=$VESSEL_ALLOCATION_TOKEN" "project=$PROJ_ABS" "worktree=${2:-}" > "$staged" \
+    && fm_backlog_atomic_transition publish "$staged" "$VESSEL_ALLOCATION" 'vessel launch allocation' "$STATE"; }; then
+    rm -f -- "$staged"
+    return 1
+  fi
+}
+VESSEL_ALLOCATION=
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
@@ -5201,13 +5223,28 @@ else
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
-    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    # WT_TARGET uses the stable window id so a rename cannot redirect the
+    # worktree discovery. The published endpoint still uses the task name.
+    if [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
+      VESSEL_SOCKET="${TMUX_TMPDIR:?}/tmux-$(id -u)/default"
+      if [ "$(tmux display-message -p '#{socket_path}')" != "$VESSEL_SOCKET" ]; then
+        echo "error: cannot prove this launch is using the vessel tmux socket $VESSEL_SOCKET" >&2
+        exit 1
+      fi
+      VESSEL_ALLOCATION="$STATE/$ID.launch-allocation"
+      VESSEL_ALLOCATION_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(16))') || exit 1
+      vessel_staged_name="fm-staged-$VESSEL_ALLOCATION_TOKEN"
+      spawn_record_vessel_allocation staged || exit 1
+      WID=$(fm_backend_tmux_create_task "$SES" "$vessel_staged_name" "$PROJ_ABS" "$VESSEL_ALLOCATION_TOKEN") || exit 1
+      # Keep the staged receipt until the duplicate/name check succeeds.
+      vessel_windows=$(tmux -S "$VESSEL_SOCKET" list-windows -t "=$SES" -F '#{window_name}') || exit 1
+      if grep -Fxq -- "$W" <<< "$vessel_windows"; then
+        echo "error: window $T already exists" >&2
+        exit 1
+      fi
+    else
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    fi
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -6222,6 +6259,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         treehouse_command="unset $worker_env_name; $treehouse_command"
       fi
     done
+    if [ -n "$VESSEL_ALLOCATION" ]; then
+      # An interrupted Treehouse request may have allocated a copy even if
+      # the shell never reported its path. Never auto-close that shell as staged.
+      spawn_record_vessel_allocation leasing || exit 1
+      tmux -S "$VESSEL_SOCKET" if-shell -F -t "$WT_TARGET" \
+        "#{==:#{@fm-task-allocation},$VESSEL_ALLOCATION_TOKEN}" \
+        "rename-window -t $WT_TARGET $W" || exit 1
+      vessel_window_binding=$(tmux -S "$VESSEL_SOCKET" list-windows -t "=$SES" \
+        -F '#{window_name} #{window_id} #{@fm-task-allocation}' | awk -v window="$W" '$1 == window')
+      if [ "$vessel_window_binding" != "$W $WT_TARGET $VESSEL_ALLOCATION_TOKEN" ]; then
+        echo "error: cannot verify the staged vessel window became $T without conflict" >&2
+        exit 1
+      fi
+    fi
     spawn_send_text_line "$WT_TARGET" "$treehouse_command"
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -6313,6 +6364,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
+  if [ -n "$VESSEL_ALLOCATION" ]; then
+    spawn_record_vessel_allocation claimed "$WT" || exit 1
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
@@ -6375,17 +6429,38 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# Per-task temp root (vessel- or legacy task-scoped) with Go's build temp nested
+# at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-# The root is private (0700) because its path is predictable under a shared
+# The legacy root is private (0700) because its path is predictable under a shared
 # /tmp: a root that already exists is reused only as a real directory owned by
 # this user and writable by nobody else, then tightened, so no other local user
 # can plant or swap a file in it. The staged launch command lives in a sibling
 # directory namespaced by home identity, not in this shared per-id root.
 TASK_TMP="/tmp/fm-$ID"
+temp_owner=
+if [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
+  temp_state=$(cd "$STATE" && pwd -P) || exit 1
+  if [ "$RELAUNCH" -eq 0 ]; then
+    TASK_TMP="$temp_state/$ID.task-tmp"
+    temp_owner="$temp_state/$ID.task-tmp-owner"
+    # Publish before mkdir; if spawn dies before metadata publication the
+    # existing supervision scan can reconcile even this first allocation.
+    (umask 077; set -C; printf 'staged=%s\n' "$TASK_TMP" > "$temp_owner") || exit 1
+  else
+    task_tmp_recorded=$(fm_meta_get "$RELAUNCH_META" tasktmp)
+    if [ "$task_tmp_recorded" = "$temp_state/$ID.task-tmp" ]; then
+      if [ "$(fm_task_tmp_owner_phase "$STATE" "$ID")" != handed-off ]; then
+        echo "error: cannot verify vessel temp ownership for $task_tmp_recorded" >&2
+        exit 1
+      fi
+      TASK_TMP=$task_tmp_recorded
+    fi
+  fi
+fi
 if (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   [ "$HARNESS" != polytoken ] || SPAWN_TASK_TMP_CREATED=1
 else
@@ -7430,6 +7505,14 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+if [ -n "$temp_owner" ]; then
+  temp_owner_stage=$(umask 077; mktemp "$temp_owner.XXXXXX") || exit 1
+  if ! { printf 'handed-off=%s\n' "$TASK_TMP" > "$temp_owner_stage" &&
+    fm_backlog_atomic_transition publish "$temp_owner_stage" "$temp_owner" 'task temp allocation receipt' "$STATE"; }; then
+    rm -f -- "$temp_owner_stage"
+    exit 1
+  fi
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -8066,7 +8149,7 @@ else
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$(printf '%q' "$TASK_TMP/gotmp")"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
@@ -8460,4 +8543,7 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+if [ -n "$VESSEL_ALLOCATION" ]; then
+  rm -- "$VESSEL_ALLOCATION" || echo "warning: could not retire allocation receipt $VESSEL_ALLOCATION" >&2
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

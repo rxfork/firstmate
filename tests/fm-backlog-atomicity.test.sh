@@ -126,7 +126,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes lsof
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -655,6 +655,11 @@ run_bootstrap() {  # <case-dir>
     FM_BOOTSTRAP_NETWORK=skip \
     PATH="$case_dir/fakebin:$PATH" \
     "$BOOTSTRAP" 2>&1
+}
+
+run_cleanup_scan() {  # <case-dir>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$1")" \
+    PATH="$1/fakebin:$PATH" "$ROOT/bin/fm-inactive-reconcile.sh" scan --startup 2>&1
 }
 
 # --- dispatch ---------------------------------------------------------------
@@ -1863,32 +1868,56 @@ test_completion_fails_loudly_and_records_the_close_it_still_owes() {
 }
 
 test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
-  local case_dir home id marker out rc=0
+  local case_dir home id marker out branch rc=0
   id=atomic-close-destructive-interrupt-b8
   case_dir=$(make_home close-destructive-interrupt "$id")
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
-  out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
+  # Exercise interrupted cleanup where no independent validation allocator
+  # can still own the copy.
+  printf '%s\n' '# Task' "## Captain's intent" 'Exercise cleanup.' '' '## Firstmate spec' \
+    'Verify cleanup recovery.' '' '# Definition of done' 'Delivery contract: mode=local-only' \
+    > "$home/data/$id/brief.md"
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode local-only --yolo off) || fail "spawn failed: $out"
+  branch=$(awk -F= '$1 == "branch" {print $2}' "$home/state/$id.meta")
+  [ -n "$branch" ] || fail "spawn did not record its branch"
+  git -C "$case_dir/wt" switch -qc "$branch" || fail "cannot create the task branch"
+  git -C "$case_dir/project" branch "$branch-personal"
   marker="$home/state/$id.backlog-close"
   interrupt_teardown_during_treehouse_return "$case_dir"
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "interrupted destructive cleanup reported success"
   assert_present "$marker" \
-    "destructive cleanup began before recording its authoritative close"
+    "destructive cleanup did not record its authoritative close: $out"
   assert_present "$home/state/$id.meta" \
     "interrupted destructive cleanup lost the task incarnation"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "interrupted cleanup changed the backlog before recovery"
 
   out=$(run_bootstrap "$case_dir")
+  assert_contains "$out" "retained $id's task record" "bootstrap hid incomplete cleanup"
+  assert_present "$home/state/$id.meta" "bootstrap forgot the resources before cleanup"
+  printf '#!/usr/bin/env bash\nexec git -C "%s" worktree remove "%s"\n' \
+    "$case_dir/project" "$case_dir/wt" > "$case_dir/fakebin/treehouse"
+  printf 'valuable work\n' > "$case_dir/wt/unsaved"
+  out=$(run_cleanup_scan "$case_dir") || fail "supervision scan failed: $out"
+  assert_contains "$out" 'uncommitted changes' 'supervision hid a dirty cleanup refusal'
+  assert_present "$case_dir/wt/unsaved" 'cleanup discarded an untracked file'
+  assert_present "$home/state/$id.meta" 'cleanup retired ownership despite a dirty copy'
+  rm -- "$case_dir/wt/unsaved"
+  out=$(run_cleanup_scan "$case_dir") || fail "supervision cleanup failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "restart left interrupted cleanup In flight: $out"
+    || fail "supervision left interrupted cleanup In flight: $out"
+  assert_absent "$case_dir/wt" "supervision did not remove the real worktree"
+  ! git -C "$case_dir/project" show-ref --verify --quiet "refs/heads/$branch" \
+    || fail "cleanup left the task branch"
+  git -C "$case_dir/project" show-ref --verify --quiet "refs/heads/$branch-personal" \
+    || fail "cleanup removed a similarly named personal branch"
   assert_absent "$marker" "restart retained the recovered close marker"
   assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "restart silently hid potentially incomplete physical cleanup"
-  pass "restart recovers closes recorded before destructive cleanup"
+  run_cleanup_scan "$case_dir" >/dev/null || fail "repeated cleanup did not converge"
+  pass "supervision resumes interrupted cleanup with real Git resources"
 }
 
 test_completion_refuses_a_close_target_symlinked_to_a_directory() {
@@ -2191,6 +2220,97 @@ test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   pass "session start preserves a pending close across a transient backlog read failure"
 }
 
+test_supervision_reaps_only_unclaimed_staged_temp() {
+  local case_dir home state id dir receipt out other
+  case_dir=$(make_home staged-temp)
+  home=$(home_of "$case_dir")
+  state=$(cd "$home/state" && pwd -P)
+  id=atomic-staged-temp-b10
+  dir="$state/$id.task-tmp"
+  receipt="$state/$id.task-tmp-owner"
+  other="$state/$id-personal.task-tmp"
+  mkdir -p -- "$dir/gotmp" "$other"
+  add_item "$case_dir" "$id"
+  printf 'staged=%s\n' "$dir" > "$receipt"
+
+  start_item "$case_dir" "$id"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" 'backlog state is in_flight' 'missing metadata was treated as abandoned work'
+  assert_present "$dir/gotmp" 'reconciliation touched another owner record'
+
+  id=atomic-empty-temp-b10
+  dir="$state/$id.task-tmp"
+  receipt="$state/$id.task-tmp-owner"
+  mkdir -p -- "$dir/gotmp"
+  printf 'staged=%s\n' "$dir" > "$receipt"
+  printf 'preserve me\n' > "$dir/gotmp/unexpected"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" 'unexpected files' 'nonempty abandoned temp was not reported'
+  assert_present "$dir/gotmp/unexpected" 'orphan cleanup removed unexpected files'
+  rm -- "$dir/gotmp/unexpected"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" 'Reclaimed unclaimed task temp allocation' 'empty staged orphan was not reclaimed'
+  assert_absent "$dir" 'staged orphan directory survived'
+  assert_absent "$receipt" 'orphan receipt survived release'
+  assert_present "$other" 'unreceipted personal temp directory was removed'
+  run_cleanup_scan "$case_dir" >/dev/null || fail 'staged temp cleanup did not converge'
+  pass 'supervision reclaims proven staged temp without touching occupied or unreceipted directories'
+}
+
+test_supervision_preserves_interrupted_worktree_acquisition() {
+  local case_dir home id receipt out
+  id=atomic-interrupted-lease-b10
+  case_dir=$(make_home interrupted-lease)
+  home=$(home_of "$case_dir")
+  receipt="$home/state/$id.launch-allocation"
+  add_item "$case_dir" "$id"
+  printf 'phase=claimed\nsocket=/unavailable/socket\nsession=fixture\ntoken=0123456789abcdef0123456789abcdef\nproject=%s\nworktree=%s\n' \
+    "$case_dir/project" "$case_dir/wt" > "$receipt"
+  printf 'valuable work\n' > "$case_dir/wt/unsaved"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" "preserve the working copy $case_dir/wt" 'lost launch ownership was not explained'
+  assert_present "$receipt" 'reconciliation erased launch ownership evidence'
+  assert_present "$case_dir/wt/unsaved" 'reconciliation discarded uncommitted work'
+  out=$(run_cleanup_scan "$case_dir")
+  case "$out" in *'preserve the working copy'*) fail 'unchanged launch exception was reissued' ;; esac
+  pass 'supervision reports interrupted worktree acquisition without discarding the copy'
+}
+
+test_supervision_refuses_unverified_resource_release() {
+  local case_dir home id marker out
+  id=atomic-unverified-cleanup-b10
+  case_dir=$(make_home unverified-cleanup)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\ntmux_stopped=1\nreleased=0\n' \
+    "$id" "$home/data" > "$marker"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-one"
+
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" "disagrees with backlog state queued" "retry did not surface inconsistent ownership"
+  assert_present "$home/state/$id.meta" "retry removed the disagreeing task record"
+  assert_present "$marker" "retry removed the pending cleanup receipt"
+  out=$(run_cleanup_scan "$case_dir")
+  case "$out" in *"disagrees with backlog state"*) fail "unchanged exception was reissued" ;; esac
+
+  # Losing the owner record is not a substitute for verified resource release.
+  rm -f "$home/state/$id.meta"
+  start_item "$case_dir" "$id"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" "missing without verified resource release" "missing owner was taken as release proof"
+  assert_present "$marker" "missing metadata erased the release exception"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] || fail "missing metadata allowed backlog close"
+
+  # Only the producer's sealed receipt can replay a backlog-only close.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\ntmux_stopped=1\nreleased=1\n' \
+    "$id" "$home/data" > "$marker"
+  out=$(run_cleanup_scan "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = 'done' ] || fail "verified release did not replay: $out"
+  assert_absent "$marker" "verified release receipt did not retire"
+  pass "supervision distinguishes inconsistent ownership, missing evidence and released resources"
+}
+
 test_recovery_retry_preserves_incomplete_cleanup_warning() {
   local case_dir home id marker out
   id=atomic-heal-retry-warning-b10
@@ -2200,21 +2320,19 @@ test_recovery_retry_preserves_incomplete_cleanup_warning() {
   start_item "$case_dir" "$id"
   write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-warning"
   marker="$home/state/$id.backlog-close"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-warning\narg=--note\narg=local%%20main\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-warning\ntmux_stopped=1\narg=--note\narg=local%%20main\n' \
     "$id" "$home/data" > "$marker"
   break_verb "$case_dir" show
 
-  out=$(run_bootstrap "$case_dir")
-  assert_absent "$home/state/$id.meta" \
-    "failed replay did not cross the task-record removal boundary"
+  out=$(run_cleanup_scan "$case_dir")
+  assert_present "$home/state/$id.meta" \
+    "failed backlog read removed the task record"
   assert_present "$marker" "failed replay discarded its pending close"
   rm -f "$case_dir/fakebin/tasks-axi"
 
-  out=$(run_bootstrap "$case_dir")
+  out=$(run_cleanup_scan "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "retried recovery left the item In flight: $out"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "retry lost the incomplete-cleanup evidence after removing metadata"
   assert_absent "$marker" "retried recovery retained its applied marker"
   pass "recovery preserves incomplete-cleanup evidence across a failed replay"
 }
@@ -2226,11 +2344,11 @@ test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
   write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-one"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=local%%20main\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\ntmux_stopped=1\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
 
-  out=$(run_bootstrap "$case_dir")
+  out=$(run_cleanup_scan "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "session start did not close the interrupted incarnation: $out"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
@@ -2272,13 +2390,13 @@ test_recovery_preserves_both_records_when_meta_removal_fails() {
   start_item "$case_dir" "$id"
   meta="$(home_of "$case_dir")/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-one"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=local%%20main\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\ntmux_stopped=1\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
   break_meta_removal "$case_dir" "$meta"
 
-  out=$(run_bootstrap "$case_dir")
-  assert_contains "$out" "the interrupted task record could not be removed" \
+  out=$(run_cleanup_scan "$case_dir")
+  assert_contains "$out" "task record could not be removed" \
     "session start did not surface the record-removal failure"
   assert_present "$meta" "failed recovery removed the task record"
   assert_present "$(home_of "$case_dir")/state/$id.backlog-close" \
@@ -2287,7 +2405,7 @@ test_recovery_preserves_both_records_when_meta_removal_fails() {
     || fail "failed recovery closed the backlog before removing meta"
 
   rm -f "$case_dir/fakebin/rm"
-  out=$(run_bootstrap "$case_dir")
+  out=$(run_cleanup_scan "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "recovery did not retry after meta removal recovered: $out"
   assert_absent "$meta" "successful retry retained the task record"
@@ -3176,6 +3294,9 @@ test_recovery_replays_a_discarded_scout_close_as_discarded
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
+test_supervision_reaps_only_unclaimed_staged_temp
+test_supervision_preserves_interrupted_worktree_acquisition
+test_supervision_refuses_unverified_resource_release
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
 test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata

@@ -355,6 +355,21 @@ If another live session holds the fleet lock, both surfaces keep the alarm but s
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating its ship branch (`fm/<id>` by default, or the project's registered prefix), then stop with a blocked status if it landed in the primary checkout.
 Placement is proven only at launch, so `bin/fm-spawn.sh` also delivers the task id as `FM_TASK_ID` to every ship and scout through its backend-specific environment channel, and `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout while that marker is set; the runner's header owns the predicate and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pins it.
 
+### Resource cleanup ownership
+
+`fm-spawn.sh` publishes task endpoint, worktree, branch intent and temporary-directory records; Treehouse's project lock and slot claim protect pooled allocation and return, while Orca supplies its own worktree identity.
+Ship instructions and scout promotion create the actual branch inside the isolated copy, so a name or matching prefix outside that copy is not creation evidence.
+`fm-teardown.sh` is the task cleanup owner and `fm-backlog-transition-lib.sh` owns its close receipt; an in-progress receipt does not substitute for verified release.
+Bootstrap and the bounded inactive scan reconcile close receipts, and the scan delegates physical replay to teardown when the receipt proves a tmux stop and the remaining work can be inspected safely.
+Vessel task temp allocations are reserved in the owning home before creation, so the scan can reclaim an empty allocation that was never handed off to a worker, without inspecting the shared temporary directory.
+Fresh vessel tmux launches reserve a private token before opening the shell, and the scan can close that exact tagged shell while its receipt still proves no worktree request was sent.
+Once a worktree request could have run, supervision keeps the launch receipt, including the exact copy when known, and reports the ownership gap instead of treating the endpoint as an unused shell.
+Failed Orca launches and ambiguous validation or endpoint ownership retain their records and surface a recoverable exception rather than retrying a destructive command.
+Vessel fullstop stop proofs remain with the vessel recovery owner, not the task cleanup scan.
+Remote validation and the remote-job service own their own allocations; task cleanup does not sweep the account's process table for remote service workers.
+The vessel owns its supervisor and warmed/shared project caches, the secondmate registry owns persistent secondmate homes, and task reports and exported evidence follow the existing durable data retention rules.
+Local branch pruning does not grant remote branch deletion authority; forge-side source-branch retention and the merge command's option boundary remain separate.
+
 ## No-mistakes gate authority boundary
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.

@@ -20,7 +20,9 @@
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
+# is retried by the next session start. If metadata is still present, only
+# guarded teardown may retry physical cleanup (via the inactive scan), not
+# backlog replay. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
 # data/backlog.md; those cases print the manual follow-up. A configured
 # non-markdown adapter remains active without a markdown file; any active
@@ -315,16 +317,8 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
-#   Fix 3 - sweep abandoned remote job workers. A remote job worker started
-#     from a worktree's own bin/ outlives that worktree's removal without
-#     being reachable by Fix 2, because its working directory is wherever it
-#     was launched rather than the task worktree (observed 2026-08-07: 29
-#     workers at ppid 1, 1-2 days old, each still polling and appending to a
-#     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
-#     owns that sweep and its safety rule; it never touches a worker whose code
-#     root still exists, so the account's healthy LaunchAgent worker and every
-#     live remote secondmate worker are out of scope. Best effort: a sweep
-#     failure never blocks this teardown.
+# Account-level remote job workers own their code-root shutdown in
+# bin/fm-remote-job-worker.sh; task teardown does not sweep their process namespace.
 # After Fix 1 and Fix 2, when config/pipeline-spend opts this home in, a ship
 # task whose local copy this teardown owns has its no-mistakes pipeline spend
 # recorded by bin/fm-pipeline-spend.sh, which owns the attribution and the
@@ -543,11 +537,13 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RESUME_CLEANUP=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --resume-cleanup) RESUME_CLEANUP=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -695,6 +691,51 @@ if [ "$TEARDOWN_META_KIND" = secondmate ]; then
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
+# This entry point is for the bounded supervision scan. Check the receipt and
+# the backlog again under the same control/meta locks as ordinary teardown.
+if [ "$RESUME_CLEANUP" = 1 ]; then
+  if [ -n "$FORCE" ] || [ "$TEARDOWN_META_KIND" = secondmate ] \
+    || { [ -z "${FM_ANCHOR:-}" ] && { [ -e "$STATE/.vessel-recovery.json" ] || [ -L "$STATE/.vessel-recovery.json" ]; }; }; then
+    echo "REFUSED: automated cleanup cannot supersede fullstop recovery, secondmate ownership, or discard authority" >&2
+    exit 1
+  fi
+  resume_marker="$STATE/$ID.backlog-close"
+  if [ "$TEARDOWN_CLEANUP_RECOVERY" = orca ]; then
+    echo "REFUSED: failed Orca launch $ID requires verified terminal and worktree inventory before cleanup" >&2
+    exit 1
+  else
+    [ -e "$resume_marker" ] || [ -L "$resume_marker" ] || exit 0
+    if ! fm_backlog_close_marker_validate "$resume_marker" "$DATA" "$ID" "$STATE" \
+      || ! fm_backlog_meta_spawn_gen "$META" "$STATE" \
+      || [ "$FM_BACKLOG_META_SPAWN_GEN" != "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" ]; then
+      echo "REFUSED: cleanup receipt $resume_marker does not verify this task incarnation" >&2
+      exit 1
+    fi
+    if [ "$FM_BACKLOG_CLOSE_VALIDATED_RELEASED" = 1 ]; then
+      if ! fm_backlog_close_marker_replay "$STATE" "$resume_marker" "$DATA"; then
+        echo "REFUSED: could not replay verified release for $ID: $FM_BACKLOG_TRANSITION_ERROR" >&2
+        exit 1
+      fi
+      echo "Reconciled verified resource release for $ID ($FM_BACKLOG_CLOSE_REPLAY_RESULT)"
+      exit 0
+    fi
+    case "${FM_BACKLOG_CLOSE_VALIDATED_ARGS[*]}" in
+      '--note discarded') echo "REFUSED: discard cleanup requires explicit operator retry" >&2; exit 1 ;;
+    esac
+  fi
+  if fm_backlog_row_probe "$DATA" "$ID"; then
+    resume_row=${FM_BACKLOG_ROW_STATE%% *}
+  elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    resume_row=not_found
+  else
+    echo "REFUSED: cannot verify backlog ownership for $ID: $FM_BACKLOG_ROW_ERROR" >&2
+    exit 1
+  fi
+  case "$TEARDOWN_CLEANUP_RECOVERY:$resume_row" in
+:in_flight) ;;
+    *) echo "REFUSED: cleanup receipt for $ID disagrees with backlog state $resume_row" >&2; exit 1 ;;
+  esac
+fi
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
@@ -1290,6 +1331,16 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+if [ "$RESUME_CLEANUP" = 1 ]; then
+  case "$BACKEND:$TEARDOWN_CLEANUP_RECOVERY" in
+    tmux:)
+      if [ "$FM_BACKLOG_CLOSE_VALIDATED_TMUX_STOPPED" != 1 ]; then
+        echo "REFUSED: cleanup has no verified stop receipt for $ID's recorded endpoint $T; reconcile it before retrying teardown" >&2
+        exit 1
+      fi ;;
+    *) echo "REFUSED: automatic cleanup cannot verify stop evidence for backend $BACKEND and task $ID" >&2; exit 1 ;;
+  esac
+fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -1308,6 +1359,27 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+TEARDOWN_TEMP_OWNER="$STATE/$ID.task-tmp-owner"
+TEARDOWN_LAUNCH_ALLOCATION="$STATE/$ID.launch-allocation"
+if [ -e "$TEARDOWN_LAUNCH_ALLOCATION" ] || [ -L "$TEARDOWN_LAUNCH_ALLOCATION" ]; then
+  if ! fm_backlog_record_present "$TEARDOWN_LAUNCH_ALLOCATION" 'vessel launch allocation' "$STATE" \
+    || ! grep -Fxq 'phase=claimed' "$TEARDOWN_LAUNCH_ALLOCATION" \
+    || ! grep -Fxq -- "worktree=$WT" "$TEARDOWN_LAUNCH_ALLOCATION" \
+    || ! grep -Fxq -- "project=$PROJ" "$TEARDOWN_LAUNCH_ALLOCATION"; then
+    echo "REFUSED: $TEARDOWN_LAUNCH_ALLOCATION does not agree with $META; reconcile the launch before cleanup" >&2
+    exit 1
+  fi
+fi
+TEARDOWN_TEMP_OWNED=0
+if [ -e "$TEARDOWN_TEMP_OWNER" ] || [ -L "$TEARDOWN_TEMP_OWNER" ]; then
+  temp_state=$(cd "$STATE" && pwd -P) || exit 1
+  if [ "$TASK_TMP" != "$temp_state/$ID.task-tmp" ] || [ -L "$TASK_TMP" ] \
+    || [ "$(fm_task_tmp_owner_phase "$STATE" "$ID")" != handed-off ]; then
+    echo "REFUSED: $TEARDOWN_TEMP_OWNER does not prove ownership of task temp allocation $TASK_TMP" >&2
+    exit 1
+  fi
+  TEARDOWN_TEMP_OWNED=1
+fi
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2207,10 +2279,16 @@ validate_worktree_teardown_safety() {
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
-    secondmate|scout) return 0 ;;
+    secondmate) return 0 ;;
+    scout) [ "$RESUME_CLEANUP" = 1 ] || return 0 ;;
   esac
 
   read_worktree_dirt || return
+  if [ "$RESUME_CLEANUP" = 1 ] && [ "$KIND" = scout ]; then
+    # Explicit scout completion may discard scratch, but no retry inherits
+    # permission to discard files or commits that appeared since the receipt.
+    dirty=$(git -C "$WT" status --porcelain --untracked-files=all --ignored) || return 1
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -3529,10 +3607,8 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # than override it, and would contradict the adjacent Herdr child gate that
 # stops forced cleanup for this same hazard.
 #
-# What is retained is this run's records, not a durable guarantee: a task
-# carrying a backlog transition already wrote its pending-close marker, and the
-# next session start replays that marker and removes the retained record. The
-# message says so rather than promising a retention teardown does not own.
+# A pending backlog close cannot retire metadata while physical cleanup is
+# still incomplete. The record remains available to the guarded retry.
 endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   local subject=$1 backend=$2 target=$3 honors_force=$4
   echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
@@ -3541,7 +3617,6 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
     return 0
   fi
   echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
-  echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
   if [ "$honors_force" = 1 ]; then
     echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
   fi
@@ -3805,7 +3880,8 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] \
+  && { [ "$KIND" != scout ] || [ "$RESUME_CLEANUP" = 1 ]; }; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -3815,7 +3891,22 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+if [ "$RESUME_CLEANUP" = 1 ] && teardown_owns_worktree && [ ! -d "$WT" ]; then
+  recorded_branch=$(fm_meta_get "$META" branch)
+  if [ -n "$recorded_branch" ]; then
+    branch_probe=0
+    [ -d "$PROJ" ] && git -C "$PROJ" show-ref --verify --quiet "refs/heads/$recorded_branch" || branch_probe=$?
+    if [ ! -d "$PROJ" ] || [ "$branch_probe" -ne 1 ]; then
+      echo "REFUSED: $WT is missing but removal of local branch $recorded_branch in $PROJ cannot be verified" >&2
+      exit 1
+    fi
+  fi
+fi
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  if [ "$RESUME_CLEANUP" = 1 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    echo "REFUSED: cannot verify remote validation has released the local copy $WT for $ID" >&2
+    exit 1
+  fi
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3851,10 +3942,17 @@ BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
-  backlog_done_args || {
-    echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
-    exit 1
-  }
+  if [ "$RESUME_CLEANUP" = 1 ]; then
+    BACKLOG_DONE_ARGS=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+    if [ "${BACKLOG_DONE_ARGS[0]-}" = --note ] && [ "${BACKLOG_DONE_ARGS[1]-}" = local%20main ]; then
+      BACKLOG_DONE_ARGS[1]='local main'
+    fi
+  else
+    backlog_done_args || {
+      echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
+      exit 1
+    }
+  fi
 fi
 
 # The initial landed/discard-work checks above have passed (or --force skipped
@@ -3864,7 +3962,8 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$KIND" != secondmate ] && teardown_owns_worktree \
+  && [ "$RESUME_CLEANUP" != 1 ]; then
   conclude_task_no_mistakes_run "$WT"
 fi
 
@@ -3959,17 +4058,42 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if [ "$RESUME_CLEANUP" = 1 ]; then
+  # A recovery receipt is not authority to signal processes merely visiting
+  # the copy, nor to abort a validation newly started outside this lifecycle.
+  for orphan_dir in "$WT" "$TASK_TMP"; do
+    if ! orphan_pids=$(pids_with_cwd_under "$orphan_dir") || [ -n "$orphan_pids" ]; then
+      echo "REFUSED: cannot verify there are no processes using $orphan_dir for cleanup of $ID" >&2
+      exit 1
+    fi
+  done
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 
+TEARDOWN_TMUX_STOP_FLAGS=()
+if [ "$BACKEND" = tmux ] && [ "$KIND" != secondmate ]; then
+  # Close the recorded endpoint before returning the copy. Persist positive
+  # stop evidence with the close so replay never closes a reused window name.
+  if [ "$RESUME_CLEANUP" = 1 ] || [ "$TEARDOWN_WINDOWLESS" = 1 ] \
+    || fm_backend_kill tmux "$T"; then
+    TEARDOWN_TMUX_STOP_FLAGS=(--tmux-stopped)
+  else
+    endpoint_close_refusal "$ID" tmux "$T" 1 || exit 1
+  fi
+fi
+
 # A worker can write after the first proof, including while its run is concluded
 # or its processes exit. Inspect the stopped copy before dropping its branch or
 # returning it on either backend path.
-if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  validate_worktree_teardown_safety || exit 1
+TEARDOWN_PROVEN_HEAD=
+if teardown_owns_worktree && [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  TEARDOWN_PROVEN_HEAD=$(git -C "$WT" rev-parse --verify HEAD) || exit 1
+  if [ "$FORCE" != "--force" ]; then
+    validate_worktree_teardown_safety || exit 1
+  fi
 fi
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -4020,6 +4144,7 @@ teardown_legacy_stamp_rollback() {
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+      "${TEARDOWN_TMUX_STOP_FLAGS[@]+"${TEARDOWN_TMUX_STOP_FLAGS[@]}"}" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
       "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
@@ -4047,10 +4172,6 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
 
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
-# pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
 # A t3code thread is stopped and archived BEFORE its slot goes back to the pool
 # or, for a secondmate, before its home is removed: a live thread whose
 # worktreePath disappears re-creates it on the next turn, so returning the slot
@@ -4067,19 +4188,50 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Drop only the recorded task branch when a record names one. Older explicit
+# teardowns retain their worktree-branch behavior; automatic recovery never
+# deletes a branch solely because it happens to be checked out in the copy.
+teardown_prune_local_branch() {
+  local branch='' recorded head inventory ref rc=0
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD) || rc=$?
+  [ "$rc" -le 1 ] || return 1
+  recorded=$(fm_meta_get "$META" branch)
+  if [ -n "$recorded" ] && [ "$recorded" != "$branch" ]; then
+    rc=0
+    git -C "$WT" show-ref --verify --quiet "refs/heads/$recorded" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "REFUSED: recorded branch $recorded is not the checked-out branch in $WT; reconcile it before cleanup" >&2
+      return 1
+    fi
+    # The task never created its branch, or pruned it on a prior attempt.
+    # Return the slot detached so resetting it cannot modify an unrelated ref.
+    [ -z "$branch" ] || git -C "$WT" checkout --detach -q "$TEARDOWN_PROVEN_HEAD"
+    return "$?"
+  fi
+  [ -n "$branch" ] || return 0
+  if [ -z "$recorded" ] && [ "$RESUME_CLEANUP" = 1 ]; then
+    echo "REFUSED: cannot verify ownership of checked-out branch $branch in $WT" >&2
+    return 1
+  fi
+  ref="refs/heads/$branch"
+  head=$TEARDOWN_PROVEN_HEAD
+  if [ -n "$head" ] && [ "$(git -C "$WT" rev-parse --verify HEAD)" = "$head" ] \
+    && git -C "$WT" checkout --detach -q "$head" \
+    && inventory=$(git -C "$WT" worktree list --porcelain) \
+    && ! grep -Fxq "branch $ref" <<< "$inventory" \
+    && git -C "$WT" update-ref --no-deref -d "$ref" "$head"; then
+    return 0
+  fi
+  echo "REFUSED: could not prune local task branch $branch at $head in $WT" >&2
+  return 1
+}
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
+    teardown_prune_local_branch || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -4093,12 +4245,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
+  teardown_prune_local_branch || exit 1
   # Remove our hook and environment files so a reused pool worktree cannot fire
   # signals for a dead task or hand a t3code env block or channel statement to
   # its next holder.
@@ -4117,7 +4264,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
+  if { [ "$KIND" = scout ] && [ "$RESUME_CLEANUP" != 1 ]; } || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1
   fi
   wt_pool_slot=0
@@ -4138,7 +4285,9 @@ if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" 
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
-elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] \
+  && { [ "$BACKEND" != tmux ] || [ "$KIND" = secondmate ]; } \
+  && [ "$TEARDOWN_WINDOWLESS" != 1 ] && [ "$RESUME_CLEANUP" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
   # a stale request. A task with no cached record costs nothing.
@@ -4181,9 +4330,15 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Release the recorded temp allocation before retiring its receipt.
+# Legacy tasks may have no tasktmp= at all.
+if [ -n "$TASK_TMP" ]; then
+  rm -rf -- "$TASK_TMP" || exit 1
+fi
+if [ "$TEARDOWN_TEMP_OWNED" = 1 ]; then
+  rm -f -- "$TEARDOWN_TEMP_OWNER" || exit 1
+fi
+rm -f -- "$TEARDOWN_LAUNCH_ALLOCATION" || exit 1
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {
@@ -4266,6 +4421,13 @@ fi
 # ordering, the row returns to Queued with its deliverable recorded.
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+  if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" --released \
+    "${TEARDOWN_TMUX_STOP_FLAGS[@]+"${TEARDOWN_TMUX_STOP_FLAGS[@]}"}" \
+    "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+    "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+    echo "error: cannot record verified release in $BACKLOG_CLOSE_MARKER; retaining $META" >&2
+    exit 1
+  fi
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
       "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     fm_lock_release "$META_LOCK"

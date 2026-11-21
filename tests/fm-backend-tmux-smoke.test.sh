@@ -81,6 +81,23 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+stage_token=0123456789abcdef0123456789abcdef
+stage_window="fm-staged-$stage_token"
+real_socket=$(tmux display-message -p '#{socket_path}')
+fm_backend_tmux_create_task "$SESSION" "$stage_window" "$HOME" "$stage_token" \
+  || fail 'could not stage an owned window'
+fm_backend_tmux_create_task "$OTHER_SESSION" "$stage_window" "$HOME" \
+  || fail 'could not create an unowned same-name window in another session'
+fm_backend_tmux_reap_staged "$real_socket" "$OTHER_SESSION" "$stage_window" "$stage_token" \
+  && fail 'cleanup accepted a same-name window with no ownership tag'
+fm_backend_tmux_reap_staged "$real_socket" "$SESSION" "$stage_window" "$stage_token" \
+  || fail 'could not reap pre-handoff staged window'
+fm_backend_tmux_reap_staged "$real_socket" "$SESSION" "$stage_window" "$stage_token" \
+  || fail 'staged-window reap did not replay idempotently'
+[ "$(tmux list-windows -t "$OTHER_SESSION" -F '#{window_name}' | grep -Fx "$stage_window")" = "$stage_window" ] \
+  || fail 'cleanup removed the other session window'
+pass 'real tmux: only the exact producer-tagged staged window is reaped'
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line

@@ -68,8 +68,8 @@ FM_BACKLOG_ROW_ERROR=
 # the row is not held.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
-# Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
-# retained_incomplete | answered | stale | noop.
+# Set by fm_backlog_close_marker_replay: closed | retained | pending_cleanup |
+# answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
@@ -889,11 +889,13 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
-  local args=()
+  local args=() tmux_stopped=0 released=legacy
   FM_BACKLOG_CLOSE_VALIDATED_ID=
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
+  FM_BACKLOG_CLOSE_VALIDATED_TMUX_STOPPED=0
+  FM_BACKLOG_CLOSE_VALIDATED_RELEASED=legacy
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
@@ -911,12 +913,16 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       data=*) data=${line#data=}; data_count=$((data_count + 1)) ;;
       spawn_gen=*) marker_spawn_gen=${line#spawn_gen=}; spawn_gen_count=$((spawn_gen_count + 1)) ;;
       cleanup_incomplete=*) cleanup_incomplete=${line#cleanup_incomplete=}; cleanup_incomplete_count=$((cleanup_incomplete_count + 1)) ;;
+      tmux_stopped=1) tmux_stopped=$((tmux_stopped + 1)) ;;
+      released=0|released=1)
+        [ "$released" = legacy ] || return 1
+        released=${line#released=} ;;
       mode=*) mode=${line#mode=}; mode_count=$((mode_count + 1)) ;;
       arg=*) args+=("${line#arg=}") ;;
       *) FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"; return 1 ;;
     esac
   done < "$marker"
-  if [ "$mode_count" -gt 1 ]; then
+  if [ "$mode_count" -gt 1 ] || [ "$tmux_stopped" -gt 1 ]; then
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1
   fi
@@ -1054,6 +1060,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_DATA=$data_resolved
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=$marker_spawn_gen
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=$cleanup_incomplete
+  FM_BACKLOG_CLOSE_VALIDATED_TMUX_STOPPED=$tmux_stopped
+  FM_BACKLOG_CLOSE_VALIDATED_RELEASED=$released
   FM_BACKLOG_CLOSE_VALIDATED_MODE=$mode
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
 }
@@ -1078,6 +1086,15 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close cleanup state"; return 1 ;;
   esac
   shift 6
+  local tmux_stopped=0 released=0
+  if [ "${1:-}" = --released ]; then
+    released=1
+    shift
+  fi
+  if [ "${1:-}" = --tmux-stopped ]; then
+    tmux_stopped=1
+    shift
+  fi
   if [ "${1:-}" = --retain ]; then
     mode=retain
     shift
@@ -1094,7 +1111,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     printf 'id=%s\n' "$id"
     printf 'data=%s\n' "$data"
     printf 'spawn_gen=%s\n' "$spawn_gen"
-    printf 'cleanup_incomplete=%s\n' "$cleanup_incomplete"
+    printf 'cleanup_incomplete=%s\nreleased=%s\n' "$cleanup_incomplete" "$released"
+    [ "$tmux_stopped" = 0 ] || printf 'tmux_stopped=1\n'
     [ "$mode" = close ] || printf 'mode=%s\n' "$mode"
     for arg in "${serialized_args[@]+"${serialized_args[@]}"}"; do
       printf 'arg=%s\n' "$arg"
@@ -1112,15 +1130,6 @@ fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [fl
   marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
   fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 0 "$@" || return 1
-  fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
-    || { rm -f "$tmp"; return 1; }
-}
-
-fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path> <id> <data-dir> <spawn-gen> [flag...]
-  local state=$1 marker=$2 id=$3 data=$4 spawn_gen=$5 tmp
-  shift 5
-  tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
-  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 1 "$@" || return 1
   fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
@@ -1175,12 +1184,18 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
-    fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
-      "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
-      || return 1
-    cleanup_incomplete=1
-    fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
-      || return 1
+    # Only a sealed release permits replay to retire metadata rather than
+    # asking the physical cleanup owner to retry.
+    if [ "$FM_BACKLOG_CLOSE_VALIDATED_RELEASED" != 1 ] || [ "$cleanup_incomplete" = 1 ]; then
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=pending_cleanup
+      return 0
+    fi
+  else
+    meta=
+  fi
+  if [ "$cleanup_incomplete" = 1 ] || [ "$FM_BACKLOG_CLOSE_VALIDATED_RELEASED" = 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$meta is missing without verified resource release; restore the exact task record and reconcile its endpoint and local copy"
+    return 1
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE
@@ -1199,37 +1214,38 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       if [ "$mode" = retain ]; then
         # The captain's answer closed the row before this replay; the retained
         # transition owes it nothing more than retiring the record.
+        if [ -n "$meta" ]; then
+          fm_backlog_atomic_transition remove "$meta" "released task record" "$state" || return 1
+        fi
         fm_backlog_close_marker_remove "$marker" "$state" || return 1
         FM_BACKLOG_CLOSE_REPLAY_RESULT=answered
         return 0
       fi
-      if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
+      if fm_backlog_atomic_transition close "$meta" "$marker" "$data" "$id" "$state" \
           "${args[@]+"${args[@]}"}"; then
-        if [ "$cleanup_incomplete" = 1 ]; then
-          FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
-        else
-          FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
-        fi
+        FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
         return 0
       fi
       return 1
       ;;
     '')
+      if [ -n "$meta" ]; then
+        FM_BACKLOG_TRANSITION_ERROR="verified release still names $meta but its backlog row is absent"
+        return 1
+      fi
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
       ;;
   esac
-  if fm_backlog_atomic_transition "$mode" '' "$marker" "$data" "$id" "$state" \
+  if [ -n "$meta" ] && [ "${row_state%% *}" != in_flight ]; then
+    FM_BACKLOG_TRANSITION_ERROR="verified release for $id disagrees with backlog state $row_state"
+    return 1
+  fi
+  if fm_backlog_atomic_transition "$mode" "$meta" "$marker" "$data" "$id" "$state" \
       "${args[@]+"${args[@]}"}"; then
     if [ "$mode" = retain ]; then
-      if [ "$cleanup_incomplete" = 1 ]; then
-        FM_BACKLOG_CLOSE_REPLAY_RESULT=retained_incomplete
-      else
-        FM_BACKLOG_CLOSE_REPLAY_RESULT=retained
-      fi
-    elif [ "$cleanup_incomplete" = 1 ]; then
-      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=retained
     else
       FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
     fi

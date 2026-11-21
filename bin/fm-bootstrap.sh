@@ -1356,14 +1356,11 @@ backlog_record_reconcile() {
         closed)
           echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"
           ;;
-        closed_incomplete)
-          echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+        pending_cleanup)
+          echo "BOOTSTRAP_INFO: retained $label's task record for guarded cleanup retry during supervision"
           ;;
         retained)
           echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after an interrupted cleanup"
-          ;;
-        retained_incomplete)
-          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
         answered)
           echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
