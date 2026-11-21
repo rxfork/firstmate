@@ -285,23 +285,31 @@ def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
             )
 
     socket = Path(options["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
+
+    def tmux(*args):
+        result = subprocess.run(
+            ["tmux", "-S", str(socket), *args],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # A tmux socket can outlive its server or disappear during shutdown.
+        if result.returncode == 1 and result.stderr.rstrip("\n") in (
+            f"no server running on {socket}",
+            f"error connecting to {socket} (No such file or directory)",
+            f"error connecting to {socket} (Connection refused)",
+        ):
+            return []
+        sys.stderr.write(result.stderr)
+        result.check_returncode()
+        return result.stdout.splitlines()
+
     shells = set()
     if recovery is not None:
         recovery.stop_workers()
     if socket.is_socket() and recovery is None:
-        windows = subprocess.check_output(
-            [
-                "tmux",
-                "-S",
-                str(socket),
-                "list-windows",
-                "-a",
-                "-F",
-                "#{session_name}:#{window_name}",
-            ],
-            env=environment,
-            text=True,
-        ).splitlines()
+        windows = tmux("list-windows", "-a", "-F", "#{session_name}:#{window_name}")
         for path in Path(options["FM_STATE_OVERRIDE"]).glob("*.meta"):
             metadata = dict(
                 line.split("=", 1)
@@ -313,19 +321,9 @@ def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
                     [str(scripts / "fm-control.sh"), path.stem, "exit"], lifecycle=True
                 )
     if socket.is_socket():
-        panes = subprocess.check_output(
-            [
-                "tmux",
-                "-S",
-                str(socket),
-                "list-panes",
-                "-a",
-                "-F",
-                "#{pid}\t#{pane_pid}\t#{pane_current_command}",
-            ],
-            env=environment,
-            text=True,
-        ).splitlines()
+        panes = tmux(
+            "list-panes", "-a", "-F", "#{pid}\t#{pane_pid}\t#{pane_current_command}"
+        )
         for pane in panes:
             server, pid, command = pane.split("\t")
             shells.add(int(server))
@@ -423,7 +421,10 @@ def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
         if socket.is_socket() and not errors:
             if recovery is not None:
                 recovery.before_server_stop()
-            stop(["tmux", "-S", str(socket), "kill-server"])
+            try:
+                tmux("kill-server")
+            except subprocess.CalledProcessError as error:
+                errors.append(f"tmux refused to stop (exit {error.returncode})")
         # Pi's sandbox wrapper can take a moment to finish its own cleanup.
         deadline = time.monotonic() + 5
         while True:
