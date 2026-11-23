@@ -1395,7 +1395,7 @@ legacy_stop_without_evidence_refuses() (
 )
 
 recovery_fixture() {
-  local anchor="$1/a" tool mode dir
+  local anchor="${3:-$1/a}" tool mode dir
   export FM_TEST_RECOVERY_WORLD=$1
   mkdir -p "$anchor" "$1/core/bin" "$1/fakebin"
   configure "$anchor"
@@ -1562,6 +1562,7 @@ resume_recreates_recorded_tmux_sessions() (
   recovery_add_task "$world" other firstmate
   recovery_add_task "$world" same custom
   bash "$recovery_cli" fullstop --anchor "$FM_ANCHOR" > "$world/stop" || fail 'alternate-session fullstop did not verify shutdown'
+  rmdir "${recovery_socket%/*}" "$TMUX_TMPDIR"
   touch "$world/fail-window"
   if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'interrupted window creation succeeded'; fi
   assert_contains "$output" 'fixture lost window publication acknowledgement' "resume did not reach named window creation: $output"
@@ -1573,6 +1574,35 @@ resume_recreates_recorded_tmux_sessions() (
     "$world/tmux.json" >/dev/null || fail 'recovery did not recreate the exact sessions and windows'
   [ -f "$world/primary" ] && [ "$(< "$world/launches")" = $'dirty\nother\nsame' ] || fail 'workers did not resume exactly once in their original sessions'
   pass 'fullstop and resume round-trip workers across multiple recorded tmux sessions'
+)
+
+arrival_resumes_workers_with_no_tmux_socket_directory() (
+  setup_harbors resume-arrival
+  local world="$FM_FIXTURE_WORLD/recovery" output socket_dir
+  local recovery_server recovery_replacement recovery_pane recovery_socket recovery_cli
+  recovery_fixture "$world" firstmate "$FM_ANCHOR"
+  rm "$FM_FIXTURE_WORLD/hosts/desktop/home/.local/share/firstmate"
+  ln -s "$world/core" "$FM_FIXTURE_WORLD/hosts/desktop/home/.local/share/firstmate"
+  activate_harbor laptop
+  bash "$ANCHOR_CLI" sail --anchor "$FM_ANCHOR" --from desktop >/dev/null || fail 'could not transfer the stopped workers'
+  socket_dir="${recovery_socket%/*}"
+  [ -d "$TMUX_TMPDIR" ] && [ ! -e "$socket_dir" ] || fail 'arrival must have no per-user tmux directory'
+  mkdir "$world/outside"
+  ln -s "$world/outside" "$socket_dir"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'resume followed a socket directory symlink'; fi
+  assert_contains "$output" 'unsafe tmux socket directory' 'expected refusal before writing outside the vessel'
+  [ ! -e "$world/outside/default" ] && [ ! -e "$world/launches" ] || fail 'unsafe directory allowed a server or worker to start'
+  rm "$socket_dir"
+
+  output=$(bash "$recovery_cli" open --anchor "$FM_ANCHOR" --agent pi -- \
+    bash "$recovery_cli" resume --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1) \
+    || fail "launch could not recover workers on arrival: $output"
+  [ -f "$world/primary" ] && [ -S "$recovery_socket" ] || fail 'launch did not bring up tmux and open the primary'
+  [ "$(stat -c %a "$socket_dir")" = 700 ] || fail 'recreated tmux directory is not private'
+  bash "$recovery_cli" resume --anchor "$FM_ANCHOR" || fail 'repeated resume failed'
+  [ "$(< "$world/launches")" = dirty ] || fail 'arrival duplicated the active worker or relaunched a parked worker'
+  [ "$(< "$TREEHOUSE_ROOT/dirty/file")" = 'unsaved edits' ] || fail 'arrival lost uncommitted changes'
+  pass 'launch after sailing recreates the private tmux directory and recovers the original unparked worker once'
 )
 
 recovery_interrupt_after_publication() {
@@ -1656,4 +1686,4 @@ interrupted_resume_can_fullstop_again() (
   pass 'fullstop can reconcile interrupted resume without forgetting workers that had not restarted yet'
 )
 
-fm_test_run sailing_reuses_verified_fullstop pushing_reuses_empty_fullstop dead_published_worker_can_resume_in_place replacement_now_waiting_stays_parked interrupted_resume_can_fullstop_again resume_recreates_recorded_tmux_sessions stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity
+fm_test_run arrival_resumes_workers_with_no_tmux_socket_directory sailing_reuses_verified_fullstop pushing_reuses_empty_fullstop dead_published_worker_can_resume_in_place replacement_now_waiting_stays_parked interrupted_resume_can_fullstop_again resume_recreates_recorded_tmux_sessions stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

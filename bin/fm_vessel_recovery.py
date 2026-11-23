@@ -127,6 +127,22 @@ class Recovery:
             stderr=stderr,
         ).strip()
 
+    def prepare_socket_directory(self):
+        # tmux -S does not create its socket's parent, and sailing omits the socket tree.
+        socket_dir = self.socket.parent
+        for directory in (socket_dir.parent, socket_dir):
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            info = directory.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o022
+            ):
+                raise ValueError(f"unsafe tmux socket directory: {directory}")
+
     def server(self):
         try:
             before = self.socket.lstat()
@@ -541,6 +557,7 @@ fm_busy_source_trusted "$4" "$source"
                     )
                 session, window = endpoint.split(":", 1)
                 if server is None:
+                    self.prepare_socket_directory()
                     self.tmux(
                         "new-session",
                         "-d",

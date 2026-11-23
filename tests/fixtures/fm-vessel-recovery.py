@@ -17,9 +17,11 @@ sock = Path(os.environ["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
 
 
 def bind():
-    sock.parent.mkdir(parents=True, exist_ok=True)
     with socket.socket(socket.AF_UNIX) as stream:
-        stream.bind(str(sock))
+        try:
+            stream.bind(str(sock))
+        except OSError as error:
+            sys.exit(f"error creating {sock} ({error.strerror})")
 
 
 def save():
