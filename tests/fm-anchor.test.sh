@@ -1319,6 +1319,30 @@ inactive_cache_is_not_an_authoritative_source() (
   pass 'an undocked cache is not a source without a matching pending arrival'
 )
 
+stale_tmux_socket_does_not_block_recovery() (
+  local mode anchor socket output
+  for mode in aheadfull launch; do
+    anchor="$TMP_ROOT/stale-tmux-$mode"
+    mkdir -p "$anchor"
+    configure "$anchor"
+    bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
+    bash "$ANCHOR_CLI" fullstop --anchor "$anchor" >/dev/null 2>"$anchor/stop.log" || fail "fullstop failed: $(< "$anchor/stop.log")"
+    socket="$TMUX_TMPDIR/tmux-$(id -u)/default"
+    mkdir -p "${socket%/*}"
+    python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$socket"
+    [ -S "$socket" ] || fail 'test did not leave a stale socket'
+    if [ "$mode" = launch ]; then
+      output=$(bash "$ANCHOR_CLI" open --anchor "$anchor" --agent pi -- \
+        bash "$ANCHOR_CLI" resume --anchor "$anchor" --if-pending -- touch "$anchor/launched" 2>&1) || fail "launch refused a stale socket: $output"
+      [ -f "$anchor/launched" ] || fail 'launch did not run after recovery'
+    else
+      output=$(bash "$ANCHOR_CLI" resume --anchor "$anchor" 2>&1) || fail "aheadfull refused a stale socket: $output"
+    fi
+    jq -e '.body.phase == "complete"' "$FM_STATE_OVERRIDE/.vessel-recovery.json" >/dev/null || fail "$mode did not complete recovery"
+  done
+  pass 'aheadfull and launch recover when the vessel tmux socket outlives its server'
+)
+
 legacy_stop_without_evidence_refuses() (
   local anchor="$TMP_ROOT/recovery-legacy" output
   mkdir -p "$anchor"
@@ -1444,4 +1468,4 @@ interrupted_fullstop_retains_the_original_worker() (
   pass 'interrupted fullstop refuses an unavailable live server and adopts its original workers on reconnect'
 )
 
-fm_test_run legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity
+fm_test_run stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

@@ -13,7 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fm_raise_anchor import process_info, vessel_environment
+from fm_raise_anchor import process_info, tmux_server_absent, vessel_environment
 
 SCRIPTS = Path(__file__).resolve().parent
 NOTE = (
@@ -118,12 +118,13 @@ class Recovery:
             check=check,
         )
 
-    def tmux(self, *args):
+    def tmux(self, *args, stderr=None):
         # Do not pass the coordination lock into the server's environment.
         return subprocess.check_output(
             ["tmux", "-S", str(self.socket), *args],
             env={**self.env, "FM_VESSEL_RECOVERY_FD": ""},
             text=True,
+            stderr=stderr,
         ).strip()
 
     def server(self):
@@ -134,9 +135,16 @@ class Recovery:
         if not stat.S_ISSOCK(before.st_mode) or before.st_uid != os.getuid():
             raise ValueError(f"not an owned tmux socket: {self.socket}")
         try:
-            proc = identity(int(self.tmux("display-message", "-p", "#{pid}")))
+            pid = self.tmux("display-message", "-p", "#{pid}", stderr=subprocess.PIPE)
+            proc = identity(int(pid))
             after = self.socket.lstat()
-        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        except subprocess.CalledProcessError as exc:
+            # The receipt must still prove that workers stopped.
+            if tmux_server_absent(exc.returncode, exc.stderr, self.socket):
+                return None
+            sys.stderr.write(exc.stderr)
+            raise ValueError(f"tmux socket unavailable: {self.socket}") from exc
+        except (OSError, ValueError) as exc:
             raise ValueError(f"tmux socket unavailable: {self.socket}") from exc
         if not proc or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             raise ValueError(f"tmux server changed during inspection: {self.socket}")

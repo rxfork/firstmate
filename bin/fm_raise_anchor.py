@@ -260,6 +260,15 @@ def vessel_environment(anchor, record):
     return environment
 
 
+def tmux_server_absent(returncode, stderr, socket):
+    # A tmux socket can outlive its server or disappear during shutdown.
+    return returncode == 1 and stderr.rstrip("\n") in (
+        f"no server running on {socket}",
+        f"error connecting to {socket} (No such file or directory)",
+        f"error connecting to {socket} (Connection refused)",
+    )
+
+
 def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
     if approved is not None:
         validate_approval(approved)
@@ -294,12 +303,7 @@ def stop_vessel(anchor, record, approved=None, recovery=None, lock_fd=None):
             text=True,
             check=False,
         )
-        # A tmux socket can outlive its server or disappear during shutdown.
-        if result.returncode == 1 and result.stderr.rstrip("\n") in (
-            f"no server running on {socket}",
-            f"error connecting to {socket} (No such file or directory)",
-            f"error connecting to {socket} (Connection refused)",
-        ):
+        if tmux_server_absent(result.returncode, result.stderr, socket):
             return []
         sys.stderr.write(result.stderr)
         result.check_returncode()
