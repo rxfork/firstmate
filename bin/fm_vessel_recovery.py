@@ -291,31 +291,48 @@ class Recovery:
         previous = self.receipt
         if previous and previous["phase"] == "stopping":
             return
-        if previous and previous["phase"] == "resuming":
-            raise ValueError("resume is incomplete; retry resume before a new fullstop")
-        server = self.server()
+        resuming = previous is not None and previous["phase"] == "resuming"
+        server, replacement = (
+            self.recovery_server() if resuming else (self.server(), False)
+        )
         panes = self.panes(server)
+        paths = sorted(self.state.glob("*.meta"))
+        if resuming and {path.stem for path in paths} != previous["tasks"].keys():
+            raise ValueError("task records changed during interrupted resume")
         tasks = {}
-        for path in sorted(self.state.glob("*.meta")):
+        for path in paths:
             task = path.stem
             meta = self.metadata(task)
-            task_identity = self.task_identity(task, meta)
+            prior = previous["tasks"].get(task) if previous else None
+            if resuming:
+                published = self.check_task(task, prior, meta)
+                task_identity = prior["identity"]
+            else:
+                published = False
+                task_identity = self.task_identity(task, meta)
             endpoint = task_identity["endpoint"]
             workers = panes.get(endpoint, [])
             if not workers:
-                prior = previous["tasks"].get(task) if previous else None
                 if (
                     prior
                     and prior["identity"] == task_identity
-                    and prior["outcome"] == "parked"
                     and prior["generation"] == meta.get("spawn_gen")
+                    and (
+                        prior["outcome"] == "parked"
+                        or (
+                            resuming and prior["outcome"] == "stopped" and not published
+                        )
+                    )
                 ):
-                    tasks[task] = prior
+                    tasks[task] = prior.copy()
+                    tasks[task].pop("retry_tx", None)
                     continue
                 raise ValueError(
                     f"{task}: original endpoint {endpoint} not found on {self.socket}; no verified stop receipt. Reconnect its original server and retry fullstop; do not recreate a lookalike window"
                 )
-            if (
+            if resuming:
+                self.check_recovery_pane(task, prior, workers, replacement)
+            elif (
                 len(workers) != 1
                 or not workers[0][2]
                 or not Path(workers[0][3])
@@ -341,7 +358,8 @@ class Recovery:
             "phase": "stopping",
             "shutdown": False,
             "token": uuid.uuid4().hex,
-            "restart_validation": self.daemon_running(),
+            "restart_validation": self.daemon_running()
+            or (resuming and previous["restart_validation"]),
         }
         if handoff_id is not None:
             self.receipt["handoff_id"] = handoff_id
@@ -362,6 +380,39 @@ class Recovery:
             raise ValueError(
                 f"original tmux server unavailable without verified shutdown: {self.socket}"
             )
+
+    def recovery_server(self):
+        server = self.server()
+        replacement = server is not None and server != self.receipt["server"]
+        if replacement and (
+            self.receipt["phase"] != "resuming"
+            or self.tmux("show-options", "-gqv", "@fm-vessel-resume")
+            != self.receipt["token"]
+        ):
+            raise ValueError(
+                f"tmux socket path reused by a different server: {self.socket}"
+            )
+        self.check_original_server(None if replacement else server)
+        return server, replacement
+
+    def check_recovery_pane(self, task, entry, current, replacement):
+        if len(current) == 1 and current[0][2]:
+            if replacement:
+                owned = (
+                    self.tmux(
+                        "show-options", "-wqv", "-t", current[0][0], "@fm-vessel-resume"
+                    )
+                    == self.receipt["token"]
+                )
+            else:
+                owned = current[0][:3] == entry["pane"]
+            if owned and Path(current[0][3]).resolve().is_relative_to(
+                entry["identity"]["worktree"]
+            ):
+                return
+        raise ValueError(
+            f"{task}: endpoint {entry['identity']['endpoint']} is not the checkpointed or recovery-owned pane in its recorded worktree"
+        )
 
     def stop_workers(self):
         server = self.server()
@@ -400,11 +451,13 @@ class Recovery:
             raise ValueError(
                 f"{task}: task identity or isolated directory changed since fullstop"
             )
-        if (
-            meta.get("spawn_gen") != entry["generation"]
-            and meta.get("control_relaunch_tx") != self.receipt["token"]
-        ):
+        published = meta.get("control_relaunch_tx") == self.relaunch_tx(entry)
+        if meta.get("spawn_gen") != entry["generation"] and not published:
             raise ValueError(f"{task}: unexpected worker generation since fullstop")
+        return published
+
+    def relaunch_tx(self, entry):
+        return entry.get("retry_tx", self.receipt["token"])
 
     def agent_state(self, endpoint):
         return self.run(
@@ -452,27 +505,7 @@ fm_busy_source_trusted "$4" "$source"
         if self.receipt["phase"] == "complete":
             return
         token = self.receipt["token"]
-        server = self.server()
-        replacement = self.receipt["server"] != server and server is not None
-        if replacement:
-            if (
-                self.receipt["phase"] != "resuming"
-                or self.tmux("show-options", "-gqv", "@fm-vessel-resume") != token
-            ):
-                raise ValueError(
-                    f"tmux socket path reused by a different server: {self.socket}"
-                )
-            original = self.receipt["server"]
-            if (
-                original
-                and original[0] == self.boot
-                and identity(original[1][0]) == original[1]
-            ):
-                raise ValueError(
-                    "original tmux server still exists; refusing to resume on its replacement"
-                )
-        else:
-            self.check_original_server(server)
+        server, replacement = self.recovery_server()
         panes = self.panes(server)
         for task, entry in self.receipt["tasks"].items():
             self.check_task(task, entry, self.metadata(task))
@@ -490,37 +523,12 @@ fm_busy_source_trusted "$4" "$source"
                 continue
             endpoint = entry["identity"]["endpoint"]
             current = panes.get(endpoint, [])
-            attempt = self.metadata(task).get("control_relaunch_tx") == token
-            if current:
-                known = len(current) == 1 and (
-                    self.tmux(
-                        "show-options", "-wqv", "-t", current[0][0], "@fm-vessel-resume"
-                    )
-                    == token
-                    if replacement
-                    else current[0][:3] == entry["pane"]
-                )
-                if not known:
-                    raise ValueError(
-                        f"{task}: endpoint {endpoint} is not the checkpointed or recovery-owned pane"
-                    )
-                state = self.agent_state(endpoint)
-                if state == "alive" and entry["outcome"] == "pending" and not attempt:
-                    print(
-                        f"{task}: left the original live worker intact", file=sys.stderr
-                    )
-                    continue
-                if state == "alive" and attempt:
-                    self.wait_for_turn(task)
-                    continue
-                if state != "dead" or attempt:
-                    raise ValueError(
-                        f"{task}: endpoint {endpoint} reads {state}; refusing to repeat an uncertain launch or stop"
-                    )
-            else:
+            meta = self.metadata(task)
+            published = self.check_task(task, entry, meta)
+            if not current:
                 if (
                     entry["outcome"] != "stopped"
-                    or attempt
+                    or published
                     or (server is not None and not replacement)
                 ):
                     raise ValueError(
@@ -590,7 +598,41 @@ fm_busy_source_trusted "$4" "$source"
                     "automatic-rename",
                     "off",
                 )
-            self.env["FM_VESSEL_RELAUNCH_TX"] = token
+                current = self.panes(server).get(endpoint, [])
+            self.check_recovery_pane(task, entry, current, replacement)
+            state = self.agent_state(endpoint)
+            if state == "alive" and published:
+                self.wait_for_turn(task, self.relaunch_tx(entry))
+                continue
+            if state == "alive" and entry["outcome"] == "pending":
+                print(f"{task}: left the original live worker intact", file=sys.stderr)
+                continue
+            if state != "dead":
+                raise ValueError(
+                    f"{task}: endpoint {endpoint} reads {state}; refusing to repeat an uncertain launch or stop"
+                )
+            if (published or "retry_tx" in entry) and self.crew_waiting(task):
+                entry.update(
+                    generation=meta.get("spawn_gen"),
+                    validation_wait=True,
+                    outcome="parked",
+                )
+                self.save()
+                print(
+                    f"{task}: left stopped because work is complete or waiting",
+                    file=sys.stderr,
+                )
+                continue
+            if published:
+                # Keep the pane's ownership token, but never credit the previous launch as this retry.
+                entry.update(
+                    generation=meta.get("spawn_gen"),
+                    outcome="stopped",
+                    retry_tx=uuid.uuid4().hex,
+                )
+                self.save()
+            tx = self.relaunch_tx(entry)
+            self.env["FM_VESSEL_RELAUNCH_TX"] = tx
             result = self.run(
                 SCRIPTS / "fm-control.sh", task, "relaunch", "--note", NOTE, check=False
             )
@@ -598,17 +640,17 @@ fm_busy_source_trusted "$4" "$source"
                 raise ValueError(
                     f"{task}: relaunch did not complete; retry resume to reconcile the original endpoint and transaction"
                 )
-            self.wait_for_turn(task)
+            self.wait_for_turn(task, tx)
         self.receipt["phase"] = "complete"
         self.save()
 
-    def wait_for_turn(self, task):
+    def wait_for_turn(self, task, tx):
         deadline = time.monotonic() + 30
         while True:
             meta = self.metadata(task)
-            if meta.get("control_relaunch_tx") == self.receipt[
-                "token"
-            ] and self.turn_acknowledged(task, meta):
+            if meta.get("control_relaunch_tx") == tx and self.turn_acknowledged(
+                task, meta
+            ):
                 print(
                     f"{task}: worker began processing its recovered instructions",
                     file=sys.stderr,

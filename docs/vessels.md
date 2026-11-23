@@ -205,12 +205,14 @@ Scout promotion and review parking cannot change task records while vessel recov
 The personal launcher's `aheadfull` runs recovery without opening Pi.
 `firstmate launch` checks for a fullstop receipt and requires recovery to succeed before opening Pi.
 Project-specific services outside the vessel's managed lifecycle are not automatically restarted.
-A replacement is confirmed only after an incarnation-bound native turn signal, so a harness without that signal reports an unconfirmed launch rather than retrying it.
+A replacement is confirmed only after an incarnation-bound native turn signal; missing acknowledgement alone never triggers a second launch.
+If a replacement exits, retry resume on the same harbor: it can relaunch into the same verified, stopped pane or leave the worker stopped if it is now done or awaiting validation.
+Use fullstop to stop a partially resumed vessel again; it rechecks present workers and preserves verified stops for workers that had not restarted.
 
 For a legacy task without a receipt, reconnect its original vessel tmux server at the recorded vessel socket and run fullstop while its endpoint is still verifiable.
 If that server was already discarded, there is no supported automatic recovery from the task record alone; leave the record and working copy intact and reconcile the original worker's history instead of making a lookalike pane or editing the record.
-Retry interrupted fullstop or resume from the same harbor; a reused socket, foreign receipt or unverifiable launch fails closed.
-The receipt is host-local and is not transferred by sailing.
+A reused socket, foreign receipt or unverifiable worker stop still prevents replay.
+Sailing rebinds verified stop records to the receiving harbor only after checking them against the transferred task records and isolated directories.
 
 The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
 This is not certification of every possible writer: a service that clears those references may not be attributable to the vessel.

@@ -83,7 +83,7 @@ if mode == "tmux":
 elif mode == "crew":
     print(
         "state: parked · source: run-step"
-        if args[0] == "parked"
+        if args[0] == "parked" or (world / f"{args[0]}-now-waiting").exists()
         else "state: working · source: pane"
     )
 elif mode == "watch":
@@ -118,6 +118,13 @@ elif mode == "control":
         save()
         print(f"stopped {task} harness=pi")
     elif verb == "relaunch":
+        tx = os.environ["FM_VESSEL_RELAUNCH_TX"]
+        assert f"control_relaunch_tx={tx}" not in meta.read_text().splitlines(), (
+            "reusing a published transaction would credit the old launch"
+        )
+        if (world / "fail-before-launch").exists():
+            (world / "fail-before-launch").unlink()
+            sys.exit("fixture interrupted before publishing the replacement")
         with (world / "launches").open("a") as stream:
             stream.write(task + "\n")
         if (world / "block-launch").exists():
@@ -129,13 +136,23 @@ elif mode == "control":
             else:
                 sys.exit("fixture timed out waiting to publish")
         assert pane["state"] == "dead", "relaunch would duplicate a live worker"
-        with meta.open("a") as stream:
-            stream.write(
-                f"control_relaunch_tx={os.environ['FM_VESSEL_RELAUNCH_TX']}\nbusy_gen=test-gen\n"
-            )
-        (state / f"{task}.busy-gen").write_text("test-gen\n")
+        generation = f"test-gen-{len((world / 'launches').read_text().splitlines())}"
+        updated = {
+            "control_relaunch_tx": tx,
+            "busy_gen": generation,
+            "spawn_gen": generation,
+        }
+        kept = [
+            line
+            for line in meta.read_text().splitlines()
+            if line.partition("=")[0] not in updated
+        ]
+        meta.write_text(
+            "\n".join(kept + [f"{k}={v}" for k, v in updated.items()]) + "\n"
+        )
+        (state / f"{task}.busy-gen").write_text(f"{generation}\n")
         (state / f"{task}.busy-state").write_text(
-            "v1 gen=test-gen seq=1 state=busy source=pi-ext event=agent-start ts=1\n"
+            f"v1 gen={generation} seq=1 state=busy source=pi-ext event=agent-start ts=1\n"
         )
         pane["state"] = "alive"
         save()
