@@ -212,7 +212,8 @@ Use fullstop to stop a partially resumed vessel again; it rechecks present worke
 For a legacy task without a receipt, reconnect its original vessel tmux server at the recorded vessel socket and run fullstop while its endpoint is still verifiable.
 If that server was already discarded, there is no supported automatic recovery from the task record alone; leave the record and working copy intact and reconcile the original worker's history instead of making a lookalike pane or editing the record.
 A reused socket, foreign receipt or unverifiable worker stop still prevents replay.
-Sailing rebinds verified stop records to the receiving harbor only after checking them against the transferred task records and isolated directories.
+An already stopped vessel can sail without restarting its workers.
+Sailing revalidates the stopped source and rebinds verified stop records to the receiving harbor only after checking them against the transferred task records and isolated directories.
 
 The inventory uses accessible same-user process cwd/environment references to vessel paths and the recorded primary.
 This is not certification of every possible writer: a service that clears those references may not be attributable to the vessel.

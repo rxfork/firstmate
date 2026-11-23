@@ -287,9 +287,10 @@ class Recovery:
         receipt.update(owner=self.owner, socket=str(self.socket), server=None)
         self.save()
 
-    def begin_stop(self, handoff_id=None):
+    def begin_stop(self):
         previous = self.receipt
         if previous and previous["phase"] == "stopping":
+            self.check_tasks()
             return
         resuming = previous is not None and previous["phase"] == "resuming"
         server, replacement = (
@@ -361,8 +362,6 @@ class Recovery:
             "restart_validation": self.daemon_running()
             or (resuming and previous["restart_validation"]),
         }
-        if handoff_id is not None:
-            self.receipt["handoff_id"] = handoff_id
         self.save()
 
     def check_original_server(self, server):
@@ -446,6 +445,13 @@ class Recovery:
         self.receipt["shutdown"] = True
         self.save()
 
+    def check_tasks(self):
+        tasks = self.receipt["tasks"]
+        if tasks.keys() != {path.stem for path in self.state.glob("*.meta")}:
+            raise ValueError("task records changed since fullstop")
+        for task, entry in tasks.items():
+            self.check_task(task, entry, self.metadata(task))
+
     def check_task(self, task, entry, meta):
         if self.task_identity(task, meta) != entry["identity"]:
             raise ValueError(
@@ -507,8 +513,7 @@ fm_busy_source_trusted "$4" "$source"
         token = self.receipt["token"]
         server, replacement = self.recovery_server()
         panes = self.panes(server)
-        for task, entry in self.receipt["tasks"].items():
-            self.check_task(task, entry, self.metadata(task))
+        self.check_tasks()
         self.receipt["phase"] = "resuming"
         self.save()
         if self.receipt["restart_validation"] and not self.daemon_running():

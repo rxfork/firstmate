@@ -557,16 +557,12 @@ def prepare_source(
     check_payload(anchor, record)
     recovery = Recovery(anchor, record, lock_fd)
     receipt = recovery.receipt
-    if (
-        receipt
-        and receipt["phase"] != "complete"
-        and not (
-            retry
-            and record.get("handoff_id")
-            and receipt.get("handoff_id") == record["handoff_id"]
-        )
+    if (receipt and receipt["phase"] != "complete") or any(
+        recovery.state.glob("*.meta")
     ):
-        fail("finish local fullstop/resume recovery before sailing")
+        recovery.begin_stop()
+    else:
+        recovery = None
     record = dict(record)
     record.update(
         anchored=False,
@@ -576,13 +572,10 @@ def prepare_source(
         known_harbors=merge_harbors(known_harbors(record), known, [destination]),
     )
     write_record(anchor, record)
-    if any(recovery.state.glob("*.meta")):
-        recovery.begin_stop(handoff_id=record["handoff_id"])
-    else:
-        recovery = None
     result = stop_vessel(anchor, record, approved, recovery, lock_fd=lock_fd)
     if result["stopped"] and recovery is not None:
-        recovery.receipt["shutdown"] = True
+        # Bind even a prior local fullstop to this arrival, but only after verifying the source is stopped.
+        recovery.receipt.update(shutdown=True, handoff_id=record["handoff_id"])
         recovery.save()
     return {"record": record, **result}
 
