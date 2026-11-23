@@ -198,7 +198,8 @@ bash bin/fm-anchor.sh resume --anchor /absolute/anchor
 
 Local fullstop checkpoints the vessel's tmux server and pane identities and the worker's isolated directory and instruction reference in a private receipt under the vessel state directory.
 It records confirmed worker stops before removing the server; an unavailable socket alone is not evidence of a stop.
-Resume leaves a positively identified live original worker alone, recreates only proven-stopped worker endpoints, and uses the existing relaunch transaction in the recorded worktree.
+Resume leaves a positively identified live original worker alone and recreates proven-stopped endpoints in their recorded tmux sessions.
+Each worker uses the existing relaunch transaction in its recorded worktree.
 Completed and validation-waiting tasks are not relaunched, and a validation daemon that was running is restarted and checked without submitting another validation.
 Scout promotion and review parking cannot change task records while vessel recovery owns them.
 The personal launcher's `aheadfull` runs recovery without opening Pi.

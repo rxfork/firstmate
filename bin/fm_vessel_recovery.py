@@ -526,12 +526,13 @@ fm_busy_source_trusted "$4" "$source"
                     raise ValueError(
                         f"{task}: missing endpoint {endpoint} without a verified stop for this launch"
                     )
+                session, window = endpoint.split(":", 1)
                 if server is None:
                     self.tmux(
                         "new-session",
                         "-d",
                         "-s",
-                        "firstmate",
+                        session,
                         "-c",
                         self.options["FM_HOME"],
                         ";",
@@ -541,17 +542,35 @@ fm_busy_source_trusted "$4" "$source"
                         token,
                     )
                     server = self.server()
+                    if (
+                        server is None
+                        or self.tmux("show-options", "-gqv", "@fm-vessel-resume")
+                        != token
+                    ):
+                        raise ValueError(
+                            "could not verify the newly created recovery tmux server"
+                        )
                     replacement = True
-                session, window = endpoint.split(":", 1)
-                if session != "firstmate":
-                    raise ValueError(
-                        f"{task}: cannot recreate non-default vessel session {session}"
+                elif (
+                    session
+                    not in self.tmux(
+                        "list-sessions", "-F", "#{session_name}"
+                    ).splitlines()
+                ):
+                    self.tmux(
+                        "new-session",
+                        "-d",
+                        "-s",
+                        session,
+                        "-c",
+                        self.options["FM_HOME"],
                     )
+                target = f"={session}:={window}"
                 self.tmux(
                     "new-window",
                     "-d",
                     "-t",
-                    "firstmate:",
+                    f"={session}:",
                     "-n",
                     window,
                     "-c",
@@ -560,14 +579,14 @@ fm_busy_source_trusted "$4" "$source"
                     "set-option",
                     "-w",
                     "-t",
-                    f"=firstmate:={window}",
+                    target,
                     "@fm-vessel-resume",
                     token,
                     ";",
                     "set-option",
                     "-w",
                     "-t",
-                    f"=firstmate:={window}",
+                    target,
                     "automatic-rename",
                     "off",
                 )

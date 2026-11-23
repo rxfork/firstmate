@@ -1372,31 +1372,36 @@ recovery_fixture() {
   # shellcheck disable=SC2016 # $2 is expanded by the generated backend function.
   printf 'fm_backend_agent_state() { python3 "%s/tests/fixtures/fm-vessel-recovery.py" agent "$2"; }\n' "$ROOT" > "$1/core/bin/fm-backend.sh"
   export PATH="$1/fakebin:$PATH"
-  local task project="$FM_PROJECTS_OVERRIDE/project"
-  fm_git_init_commit "$project"
-  for task in dirty parked; do
-    git -C "$project" worktree add --quiet -b "branch-$task" "$TREEHOUSE_ROOT/$task"
-    mkdir -p "$FM_DATA_OVERRIDE/$task"
-    printf 'original instructions\n' > "$FM_DATA_OVERRIDE/$task/brief.md"
-    printf 'window=firstmate:fm-%s\nworktree=%s\nproject=%s\nkind=ship\nharness=pi\nmode=local-only\nbranch=branch-%s\n' \
-      "$task" "$TREEHOUSE_ROOT/$task" "$project" "$task" > "$FM_STATE_OVERRIDE/$task.meta"
-  done
-  printf 'unsaved edits\n' > "$TREEHOUSE_ROOT/dirty/file"
-  printf 'captain decision pending at https://example.invalid/pull/7\n' > "$FM_STATE_OVERRIDE/parked.status"
+  fm_git_init_commit "$FM_PROJECTS_OVERRIDE/project"
   touch "$1/validation-running"
   env -i "$(command -v sleep)" 120 & recovery_server=$!
   env -i "$(command -v sleep)" 120 & recovery_replacement=$!
   env -i "$(command -v sleep)" 120 & recovery_pane=$!
   trap 'kill "$recovery_server" "$recovery_replacement" "$recovery_pane" 2>/dev/null || true; wait "$recovery_server" "$recovery_replacement" "$recovery_pane" 2>/dev/null || true' EXIT
-  jq -n --arg root "$TREEHOUSE_ROOT" --argjson original "$recovery_server" --argjson next "$recovery_replacement" --argjson pane "$recovery_pane" '
-    {pid:$original, replacement_pid:$next, pane_pid:$pane, panes:{
-      "firstmate:fm-dirty":{index:1,pid:$pane,cwd:($root+"/dirty"),state:"alive"},
-      "firstmate:fm-parked":{index:2,pid:$pane,cwd:($root+"/parked"),state:"alive"}
-    }}' > "$1/tmux.json"
+  jq -n --argjson original "$recovery_server" --argjson next "$recovery_replacement" --argjson pane "$recovery_pane" '
+    {pid:$original, replacement_pid:$next, pane_pid:$pane, sessions:[], panes:{}}' > "$1/tmux.json"
+  recovery_add_task "$1" dirty "${2:-firstmate}"
+  recovery_add_task "$1" parked firstmate
+  printf 'unsaved edits\n' > "$TREEHOUSE_ROOT/dirty/file"
+  printf 'captain decision pending at https://example.invalid/pull/7\n' > "$FM_STATE_OVERRIDE/parked.status"
   recovery_socket="$TMUX_TMPDIR/tmux-$(id -u)/default"
   mkdir -p "${recovery_socket%/*}"
   recovery_bind_socket
   recovery_cli="$1/core/bin/fm-anchor.sh"
+}
+
+recovery_add_task() {
+  local world=$1 task=$2 session=$3 project="$FM_PROJECTS_OVERRIDE/project" wt="$TREEHOUSE_ROOT/$2"
+  git -C "$project" worktree add --quiet -b "branch-$task" "$wt"
+  mkdir -p "$FM_DATA_OVERRIDE/$task"
+  printf 'original instructions\n' > "$FM_DATA_OVERRIDE/$task/brief.md"
+  printf 'window=%s:fm-%s\nworktree=%s\nproject=%s\nkind=ship\nharness=pi\nmode=local-only\nbranch=branch-%s\n' \
+    "$session" "$task" "$wt" "$project" "$task" > "$FM_STATE_OVERRIDE/$task.meta"
+  jq --arg session "$session" --arg endpoint "$session:fm-$task" --arg path "$wt" '
+    .sessions |= (. + [$session] | unique) |
+    .panes[$endpoint] = {index:(.panes | length + 1),pid:.pane_pid,cwd:$path,state:"alive"}' \
+    "$world/tmux.json" > "$world/next.json"
+  mv "$world/next.json" "$world/tmux.json"
 }
 
 recovery_bind_socket() {
@@ -1513,4 +1518,24 @@ stopped_vessel_refuses_review_resume_without_writes() (
   pass 'review resume cannot change parking records while fullstop owns them'
 )
 
-fm_test_run stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity
+resume_recreates_recorded_tmux_sessions() (
+  local world="$TMP_ROOT/session-replay" output
+  local recovery_server recovery_replacement recovery_pane recovery_socket recovery_cli
+  recovery_fixture "$world" custom
+  recovery_add_task "$world" other firstmate
+  recovery_add_task "$world" same custom
+  bash "$recovery_cli" fullstop --anchor "$FM_ANCHOR" > "$world/stop" || fail 'alternate-session fullstop did not verify shutdown'
+  touch "$world/fail-window"
+  if output=$(bash "$recovery_cli" resume --anchor "$FM_ANCHOR" 2>&1); then fail 'interrupted window creation succeeded'; fi
+  assert_contains "$output" 'fixture lost window publication acknowledgement' "resume did not reach named window creation: $output"
+  [ ! -e "$world/launches" ] || fail 'interrupted window creation launched a worker'
+  output=$(bash "$recovery_cli" open --anchor "$FM_ANCHOR" --agent pi -- \
+    bash "$recovery_cli" resume --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1) \
+    || fail "named sessions blocked launch: $output"
+  jq -e '(.sessions | sort) == ["custom","firstmate"] and (.panes | keys == ["custom:fm-dirty","custom:fm-same","firstmate:fm-other"])' \
+    "$world/tmux.json" >/dev/null || fail 'recovery did not recreate the exact sessions and windows'
+  [ -f "$world/primary" ] && [ "$(< "$world/launches")" = $'dirty\nother\nsame' ] || fail 'workers did not resume exactly once in their original sessions'
+  pass 'fullstop and resume round-trip workers across multiple recorded tmux sessions'
+)
+
+fm_test_run resume_recreates_recorded_tmux_sessions stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses fullstop_resume_replays_owned_work_once interrupted_fullstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

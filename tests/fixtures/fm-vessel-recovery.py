@@ -45,15 +45,22 @@ if mode == "tmux":
         os.kill(server["pid"], signal.SIGTERM)
         server["panes"] = {}
         save()
+    elif command == "list-sessions":
+        print("\n".join(server["sessions"]))
     elif command == "new-session":
-        bind()
-        server["pid"] = server["replacement_pid"]
-        server["token"] = args[-1]
+        session = args[args.index("-s") + 1]
+        if not sock.exists():
+            bind()
+            server.update(pid=server["replacement_pid"], token=args[-1], sessions=[])
+        if session in server["sessions"]:
+            sys.exit("duplicate session")
+        server["sessions"].append(session)
         save()
     elif command == "new-window":
-        name = "firstmate:" + args[args.index("-n") + 1]
-        if name in panes:
-            sys.exit("duplicate endpoint")
+        session = args[args.index("-t") + 1].removeprefix("=").removesuffix(":")
+        name = f"{session}:" + args[args.index("-n") + 1]
+        if session not in server["sessions"] or name in panes:
+            sys.exit("missing session or duplicate endpoint")
         panes[name] = {
             "index": len(panes) + 1,
             "pid": server["pane_pid"],
@@ -97,7 +104,13 @@ elif mode == "daemon":
         sys.exit(f"unexpected daemon command: {args}")
 elif mode == "control":
     task, verb, *_ = args
-    pane = server["panes"][f"firstmate:fm-{task}"]
+    meta = state / f"{task}.meta"
+    endpoint = next(
+        line.removeprefix("window=")
+        for line in meta.read_text().splitlines()
+        if line.startswith("window=")
+    )
+    pane = server["panes"][endpoint]
     if verb == "exit":
         if (world / "refuse-stop").exists() and task == "dirty":
             sys.exit("fixture refused to stop")
@@ -116,7 +129,6 @@ elif mode == "control":
             else:
                 sys.exit("fixture timed out waiting to publish")
         assert pane["state"] == "dead", "relaunch would duplicate a live worker"
-        meta = state / f"{task}.meta"
         with meta.open("a") as stream:
             stream.write(
                 f"control_relaunch_tx={os.environ['FM_VESSEL_RELAUNCH_TX']}\nbusy_gen=test-gen\n"
