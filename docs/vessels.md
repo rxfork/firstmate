@@ -200,6 +200,7 @@ Local fullstop checkpoints the vessel's tmux server and pane identities and the 
 It records confirmed worker stops before removing the server; an unavailable socket alone is not evidence of a stop.
 Resume leaves a positively identified live original worker alone, recreates only proven-stopped worker endpoints, and uses the existing relaunch transaction in the recorded worktree.
 Completed and validation-waiting tasks are not relaunched, and a validation daemon that was running is restarted and checked without submitting another validation.
+Scout promotion and review parking cannot change task records while vessel recovery owns them.
 The personal launcher's `aheadfull` runs recovery without opening Pi.
 `firstmate launch` checks for a fullstop receipt and requires recovery to succeed before opening Pi.
 Project-specific services outside the vessel's managed lifecycle are not automatically restarted.

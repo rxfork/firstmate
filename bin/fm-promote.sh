@@ -183,6 +183,10 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
   exit 1
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
+# Promotion changes identity that fullstop records, so take the vessel lock before the task lock.
+# shellcheck source=bin/fm-vessel-lock-lib.sh
+. "$SCRIPT_DIR/fm-vessel-lock-lib.sh"
+fm_vessel_guard_mutation "${BASH_SOURCE[0]}" "$@" || exit 1
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=

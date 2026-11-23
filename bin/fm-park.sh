@@ -157,6 +157,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG"
 
+# Park records affect recovery even outside the delegated exit/relaunch call.
+case "${1:-}" in
+  park|resume|land|run|tick)
+    # shellcheck source=bin/fm-vessel-lock-lib.sh
+    . "$SCRIPT_DIR/fm-vessel-lock-lib.sh"
+    fm_vessel_guard_mutation "${BASH_SOURCE[0]}" "$@" || exit 1
+    ;;
+esac
+
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
