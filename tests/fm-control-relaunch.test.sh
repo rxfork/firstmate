@@ -111,7 +111,15 @@ case "${1:-}" in
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
-            /bin/sleep 1
+            if [ -n "${FM_FAKE_CWD_RACE_RELEASE:-}" ]; then
+              for ((i=0; i<500; i++)); do
+                [ ! -e "$FM_FAKE_CWD_RACE_RELEASE" ] || break
+                /bin/sleep 0.05
+              done
+              [ -e "$FM_FAKE_CWD_RACE_RELEASE" ] || exit 1
+            else
+              /bin/sleep 1
+            fi
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
@@ -198,10 +206,10 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
-# add_ship_task <case-dir> <id> [harness] [session]
+# add_ship_task <case-dir> <id> [harness] [session] [worktree]
 add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude} ses=${4:-fmses}
-  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  local home="$dir/home" proj="$dir/proj" wt="${5:-$dir/wt}"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
@@ -2388,6 +2396,65 @@ SH
   pass "fm-control relaunch: a vanished watcher scratch file does not fail the child-record checkpoint"
 }
 
+test_vessel_control_relaunch_preserves_both_locks() (
+  [ "$(uname -s)" = Linux ] || exit 0
+  local dir anchor vessel lock wt out rc=0 holder i id="vessel-rl-$$"
+  dir=$(new_case vessel-relaunch "$id")
+  anchor="$dir/anchor"
+  mkdir -p "$anchor"
+  env -u TREEHOUSE_ROOT -u NM_HOME -u LAVISH_AXI_STATE_DIR -u PI_CODING_AGENT_SESSION_DIR \
+    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$anchor" --agent pi >/dev/null || fail 'could not initialize the fixture vessel'
+  vessel="$anchor/.firstmate/flagship"
+  lock="$vessel.lock"
+  rmdir "$dir/home/state" "$dir/home/data" "$dir/home" || fail 'fixture home is not empty'
+  ln -s "$vessel" "$dir/home" || fail 'could not point the fixture home at the vessel'
+  mkdir -p "$dir/home/projects/proj"
+  ln -s "$dir/home/projects/proj" "$dir/proj" || fail 'could not put the fixture project in the vessel'
+  wt="$vessel/worktrees/$id"
+  add_ship_task "$dir" "$id" pi fmses "$wt"
+  # shellcheck disable=SC2064 # Capture the fixture id before leaving the test function.
+  trap "fm_test_remove_tree '/tmp/fm-$id'" EXIT
+  printf 'bash' > "$dir/fake/command"
+  printf 'pi' > "$dir/fake/becomes"
+  printf 'unsaved work\n' > "$wt/uncommitted.txt"
+  export FM_ANCHOR="$anchor" FM_VESSEL=flagship FM_BACKEND=tmux
+  export TREEHOUSE_ROOT="$vessel/worktrees" NM_HOME="$vessel/no-mistakes"
+  export LAVISH_AXI_STATE_DIR="$vessel/lavish-axi" PI_CODING_AGENT_SESSION_DIR="$vessel/pi/sessions"
+
+  FM_FAKE_CWD_RACE_READY="$dir/ready" FM_FAKE_CWD_RACE_RELEASE="$dir/release" \
+    run_control "$dir" "$id" relaunch --note 'Continue in the existing copy.' > "$dir/relaunch.log" &
+  holder=$!
+  for ((i=0; i<200; i++)); do
+    [ -e "$dir/ready" ] && break
+    kill -0 "$holder" 2>/dev/null || break
+    /bin/sleep 0.05
+  done
+  if [ ! -e "$dir/ready" ]; then
+    : > "$dir/release"
+    wait "$holder" || true
+    fail "relaunch did not start its inspection: $(< "$dir/relaunch.log")"
+  fi
+  local exclusive=0
+  flock -x -n -E 75 "$lock" true || exclusive=$?
+  out=$(FM_CONTROL_RELAUNCH_TX=unrelated run_spawn "$dir" "$id" --relaunch) || rc=$?
+  : > "$dir/release"
+  wait "$holder" || fail "vessel relaunch refused: $(< "$dir/relaunch.log")"
+  expect_code 75 "$exclusive" 'the vessel lock must cover the control transaction'
+  expect_code 1 "$rc" 'direct spawn must refuse another lifecycle action'
+  assert_contains "$out" "another lifecycle action is already running for task $id" 'unrelated spawn must not borrow the task lock'
+  assert_grep "relaunched $id harness=pi " "$dir/relaunch.log" 'the guarded transaction must succeed'
+  [ "$(meta_field "$dir" "$id" worktree)" = "$wt" ] || fail 'relaunch changed the recorded copy'
+  [ "$(< "$wt/uncommitted.txt")" = 'unsaved work' ] || fail 'relaunch discarded uncommitted work'
+  [ "$(grep -c 'encode launch-brief' "$dir/fake/literal")" = 1 ] || fail 'expected exactly one replacement launch'
+  [ ! -e "$dir/fake/created-windows" ] || fail 'relaunch opened a second window'
+
+  rc=0
+  out=$(flock -x -n "$lock" env FM_VESSEL_MUTATOR="$SPAWN" bash -c '"$@"' bash "$SPAWN" "$id" --relaunch 2>&1) || rc=$?
+  expect_code 1 "$rc" 'an ambient continuation marker must not bypass exclusive vessel ownership'
+  assert_contains "$out" 'cannot verify shared vessel lock ownership' 'a continuation must prove its actual lock'
+  pass 'fm-control relaunch: vessel lock re-exec preserves task ownership without accepting unrelated callers'
+)
+
 test_concurrent_relaunch_is_refused() {
   local dir out rc lock holder i
   dir=$(new_case lock rl19)
@@ -3250,6 +3317,7 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+test_vessel_control_relaunch_preserves_both_locks
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
