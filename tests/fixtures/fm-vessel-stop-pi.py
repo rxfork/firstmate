@@ -7,6 +7,7 @@ import pty
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 rpc = len(sys.argv) > 2 and sys.argv[2] == "rpc"
-core = Path(__file__).resolve().parents[2]
+source = Path(__file__).resolve().parents[2]
 anchor = root / "anchor"
 anchor.mkdir(parents=True)
 pi = Path(shutil.which("pi")).resolve()
@@ -50,10 +51,29 @@ commands = root / "bin"
 commands.mkdir()
 (commands / "pi").symlink_to(pi)
 environment["PATH"] = f"{commands}:{environment['PATH']}"
+core = Path(environment["XDG_DATA_HOME"]) / "firstmate"
+shutil.copytree(
+    source / "bin", core / "bin", ignore=shutil.ignore_patterns("__pycache__")
+)
 cli = ["bash", str(core / "bin/fm-anchor.sh")]
+target = ["--anchor", str(anchor)]
+stop = [*cli, "fullstop", *target]
+launch = [
+    *cli,
+    "open",
+    *target,
+    "--agent",
+    "pi",
+    "--",
+    *cli,
+    "resume",
+    *target,
+    "--if-pending",
+    "--",
+]
 record = json.loads(
     subprocess.check_output(
-        [*cli, "init", "--anchor", str(anchor), "--agent", "pi"],
+        [*cli, "init", *target, "--agent", "pi"],
         env=environment,
         text=True,
     )
@@ -107,7 +127,7 @@ if rpc:
 else:
     master, slave = pty.openpty()
 process = subprocess.Popen(
-    arguments,
+    [*launch, *arguments],
     cwd=root,
     env=environment,
     text=True,
@@ -151,7 +171,7 @@ try:
     unrelated = subprocess.Popen(["sleep", "120"], cwd=root, env=unrelated_environment)
     for _ in range(2):
         result = subprocess.run(
-            [*cli, "stop", "--anchor", str(anchor)],
+            stop,
             cwd=root,
             env=environment,
             text=True,
@@ -176,7 +196,7 @@ try:
     writer.terminate()
     writer.wait(timeout=5)
     result = subprocess.run(
-        [*cli, "stop", "--anchor", str(anchor)],
+        stop,
         cwd=root,
         env=environment,
         text=True,
@@ -202,9 +222,25 @@ try:
         "shutdown lost existing session history"
     )
     assert unrelated.poll() is None, "source stopping touched unrelated work"
+    socket_path = Path(environment["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
+    socket_path.parent.mkdir(exist_ok=True)
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(socket_path))
+    reopened = subprocess.run(
+        [*launch, "test", "-f", str(history)],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=25,
+    )
+    assert reopened.returncode == 0, (
+        f"Pi {version}: installed core could not reopen after fullstop: {reopened.stderr}"
+    )
     (state / ".lock").write_text(str(unrelated.pid) + "\n")
     refused = subprocess.run(
-        [*cli, "stop", "--anchor", str(anchor)],
+        stop,
         cwd=root,
         env=environment,
         text=True,
@@ -216,7 +252,7 @@ try:
         "an unverified primary was signalled or ignored"
     )
     print(
-        "Source coordination, request deduplication, history retention and process isolation passed"
+        "Source coordination, request deduplication, history retention, process isolation and reopen after fullstop passed"
     )
 finally:
     for child in (writer, unrelated, process):

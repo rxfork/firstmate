@@ -38,7 +38,9 @@ They verify SIGTERM default yes, SIGKILL default no, explicit remote force-kill 
 `python3 tests/fixtures/fm-vessel-stop-pi.py <scratch-directory> rpc` passed on 2026-11-17 with real Pi 1.5.2, using an isolated session and no model prompt.
 The probe verified one durable source-agent request across retries, SIGTERM termination, retained session history and an unrelated process left running.
 Its RPC exit was 143; that is not proof that interactive shutdown hooks ran.
-`tests/fm-vessel-stop-pi-live.test.sh` is the token-free interactive guard; PTY allocation was unavailable in this verification environment, so interactive shutdown remains unverified here.
+On 2026-11-23, `PATH=/usr/bin:/bin bash bin/fm-test-run.sh tests/fm-vessel-stop-pi-live.test.sh` passed with Pi 1.5.2 in RPC mode (`FM_TEST_COMPLETE`, exit 0).
+The test used an isolated install and exercised `open` and `resume --if-pending`, `fullstop`, and reopening with a socket file but no tmux listener.
+It verified one cleanup request across retries, history retention, and process isolation; it did not exercise interactive shutdown hooks because PTY allocation was unavailable.
 
 These results are not live SSH transfer, interactive Pi/Nono or actual tmux-pane verification and do not certify every possible writer.
 [Vessels](../vessels.md) owns the supported source-stopping scope and its limits.
