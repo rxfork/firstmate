@@ -854,13 +854,15 @@ settle_pending() {  # <id>
 # the lane saved in <cursor> and wrapping around. When the tick runs out of time
 # it saves the next lane there, so a slow early lane cannot starve later ones.
 visit_lanes() {  # <cursor> <visit> <id>...
-  local cursor=$1 visit=$2 start id
+  local LC_ALL=C cursor=$1 visit=$2 start id
   local -a first=() rest=()
   shift 2
   start=$(cat "$cursor" 2>/dev/null || true)
-  for id in "$@"; do
+  # A filename suffix can change the order of ids that share a prefix.
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
     if [[ "$id" < "$start" ]]; then rest+=("$id"); else first+=("$id"); fi
-  done
+  done < <(printf '%s\n' "$@" | LC_ALL=C sort)
   for id in ${first[@]+"${first[@]}"} ${rest[@]+"${rest[@]}"}; do
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
       printf '%s\n' "$id" > "$cursor"

@@ -564,21 +564,22 @@ test_hung_pending_check_ends_within_the_tick() {
   w=$(make_world park-pending-hang "$GH_URL")
   gh_fixture "$w/gh.1.json"
   kill_park_during_stop "$w"
-  cp "$w/state/lane.meta" "$w/state/lane2.meta"
-  cp "$w/state/lane.review-park" "$w/state/lane2.review-park"
+  # The filenames sort differently from the ids even in the C locale.
+  cp "$w/state/lane.meta" "$w/state/lane-2.meta"
+  cp "$w/state/lane.review-park" "$w/state/lane-2.review-park"
   : > "$w/tmux.hang"
   start=$(date +%s)
-  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  out=$(LC_ALL=C FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
   took=$(( $(date +%s) - start ))
   [ "$took" -lt 10 ] || fail "pending-hang: a hung agent check held the tick for ${took}s"
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "pending-hang: tick acted: $out"
   grep -qx 'pending=1' "$w/state/lane.review-park" || fail "pending-hang: an unanswered check settled a pending record"
-  grep -qx 'pending=1' "$w/state/lane2.review-park" || fail "pending-hang: an unvisited pending record was settled"
-  [ "$(cat "$w/state/.review-park-tick-next" 2>/dev/null)" = lane2 ] \
+  grep -qx 'pending=1' "$w/state/lane-2.review-park" || fail "pending-hang: an unvisited pending record was settled"
+  [ "$(cat "$w/state/.review-park-tick-next" 2>/dev/null)" = lane-2 ] \
     || fail "pending-hang: the tick did not save the lane it never reached"
   rm -f "$w/tmux.hang"
   run_park "$w" tick >/dev/null 2>&1
-  ! grep -q '^pending=' "$w/state/lane.review-park" "$w/state/lane2.review-park" \
+  ! grep -q '^pending=' "$w/state/lane.review-park" "$w/state/lane-2.review-park" \
     || fail "pending-hang: the next tick did not settle the pending records"
   pass "a hung agent check on a pending park ends within the tick, and the next tick resumes and settles it"
 }
