@@ -17,7 +17,7 @@ fi
 
 pi_stops_after_source_coordination() {
   python3 "$ROOT/tests/fixtures/fm-vessel-stop-pi.py" "$TMP_ROOT/native" "$mode"
-  pass "real Pi ($mode) stops without a model call, preserves history and reopens after fullstop"
+  pass "real Pi ($mode) stops without a model call, preserves history and reopens after allstop"
 }
 
 fm_test_run pi_stops_after_source_coordination

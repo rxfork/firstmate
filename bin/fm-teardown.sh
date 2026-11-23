@@ -696,7 +696,7 @@ TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 if [ "$RESUME_CLEANUP" = 1 ]; then
   if [ -n "$FORCE" ] || [ "$TEARDOWN_META_KIND" = secondmate ] \
     || { [ -z "${FM_ANCHOR:-}" ] && { [ -e "$STATE/.vessel-recovery.json" ] || [ -L "$STATE/.vessel-recovery.json" ]; }; }; then
-    echo "REFUSED: automated cleanup cannot supersede fullstop recovery, secondmate ownership, or discard authority" >&2
+    echo "REFUSED: automated cleanup cannot supersede allstop recovery, secondmate ownership, or discard authority" >&2
     exit 1
   fi
   resume_marker="$STATE/$ID.backlog-close"

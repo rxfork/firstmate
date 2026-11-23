@@ -574,7 +574,7 @@ def prepare_source(
     write_record(anchor, record)
     result = stop_vessel(anchor, record, approved, recovery, lock_fd=lock_fd)
     if result["stopped"] and recovery is not None:
-        # Bind even a prior local fullstop to this arrival, but only after verifying the source is stopped.
+        # Bind even a prior local allstop to this arrival, but only after verifying the source is stopped.
         recovery.receipt.update(shutdown=True, handoff_id=record["handoff_id"])
         recovery.save()
     return {"record": record, **result}
@@ -1262,8 +1262,8 @@ def main():
             "init",
             "check",
             "sail",
-            "fullstop",
-            "resume",
+            "allstop",
+            "aheadfull",
             "status",
             "scuttle",
             "_peer",
@@ -1294,8 +1294,8 @@ def main():
         ),
     )
     args = parser.parse_args()
-    if args.if_pending and args.operation != "resume":
-        parser.error("--if-pending requires resume")
+    if args.if_pending and args.operation != "aheadfull":
+        parser.error("--if-pending requires aheadfull")
     global VESSEL_NAME
     if not valid_name(args.vessel):
         parser.error(
@@ -1328,7 +1328,7 @@ def main():
             )
         )
         return
-    if args.operation in ("fullstop", "resume", "status", "_route"):
+    if args.operation in ("allstop", "aheadfull", "status", "_route"):
         expected = validate_configuration(json.load(sys.stdin), anchor)
         record = read_record(anchor)
         if record["harbor"] != here() or record["options"] != expected["options"]:
@@ -1371,7 +1371,7 @@ def main():
                 ):
                     return
                 require_separate_terminal(record)
-                if args.operation == "resume":
+                if args.operation == "aheadfull":
                     recovery.resume()
                 else:
                     recovery.begin_stop()

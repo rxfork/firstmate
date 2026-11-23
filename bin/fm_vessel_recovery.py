@@ -1,4 +1,4 @@
-"""Host-local fullstop receipts and tmux endpoint recovery for anchored vessels."""
+"""Host-local allstop receipts and tmux endpoint recovery for anchored vessels."""
 
 import hashlib
 import json
@@ -65,7 +65,7 @@ class Recovery:
                     raise ValueError("invalid version or checksum")
             except (ValueError, KeyError, TypeError) as exc:
                 raise ValueError(
-                    f"{self.path}: corrupt fullstop receipt: {exc}"
+                    f"{self.path}: corrupt allstop receipt: {exc}"
                 ) from exc
             transferred = (
                 arrival
@@ -81,7 +81,7 @@ class Recovery:
                 body["owner"] != self.owner or body["socket"] != str(self.socket)
             ):
                 raise ValueError(
-                    f"{self.path}: fullstop receipt belongs to a different vessel, harbor or socket"
+                    f"{self.path}: allstop receipt belongs to a different vessel, harbor or socket"
                 )
             self.receipt = body
             if transferred:
@@ -215,7 +215,7 @@ class Recovery:
             raise ValueError(f"{task}: task record is not a local vessel worker")
         if meta.get("kind", "ship") not in ("ship", "scout"):
             raise ValueError(
-                f"{task}: fullstop recovery does not own this task kind ({meta['kind']})"
+                f"{task}: allstop recovery does not own this task kind ({meta['kind']})"
             )
         if (
             not worktree.is_absolute()
@@ -345,7 +345,7 @@ class Recovery:
                     tasks[task].pop("retry_tx", None)
                     continue
                 raise ValueError(
-                    f"{task}: original endpoint {endpoint} not found on {self.socket}; no verified stop receipt. Reconnect its original server and retry fullstop; do not recreate a lookalike window"
+                    f"{task}: original endpoint {endpoint} not found on {self.socket}; no verified stop receipt. Reconnect its original server and retry allstop; do not recreate a lookalike window"
                 )
             if resuming:
                 self.check_recovery_pane(task, prior, workers, replacement)
@@ -464,18 +464,18 @@ class Recovery:
     def check_tasks(self):
         tasks = self.receipt["tasks"]
         if tasks.keys() != {path.stem for path in self.state.glob("*.meta")}:
-            raise ValueError("task records changed since fullstop")
+            raise ValueError("task records changed since allstop")
         for task, entry in tasks.items():
             self.check_task(task, entry, self.metadata(task))
 
     def check_task(self, task, entry, meta):
         if self.task_identity(task, meta) != entry["identity"]:
             raise ValueError(
-                f"{task}: task identity or isolated directory changed since fullstop"
+                f"{task}: task identity or isolated directory changed since allstop"
             )
         published = meta.get("control_relaunch_tx") == self.relaunch_tx(entry)
         if meta.get("spawn_gen") != entry["generation"] and not published:
-            raise ValueError(f"{task}: unexpected worker generation since fullstop")
+            raise ValueError(f"{task}: unexpected worker generation since allstop")
         return published
 
     def relaunch_tx(self, entry):
@@ -521,7 +521,7 @@ fm_busy_source_trusted "$4" "$source"
             legacy = next(iter(sorted(self.state.glob("*.meta"))), None)
             if legacy:
                 raise ValueError(
-                    f"{legacy.stem}: no fullstop receipt for the original tmux socket/server and worker stop. Reconnect the original server and run fullstop first; an already-discarded legacy server cannot be reconstructed from task metadata"
+                    f"{legacy.stem}: no allstop receipt for the original tmux socket/server and worker stop. Reconnect the original server and run allstop first; an already-discarded legacy server cannot be reconstructed from task metadata"
                 )
             return
         if self.receipt["phase"] == "complete":
@@ -660,7 +660,7 @@ fm_busy_source_trusted "$4" "$source"
             )
             if result.returncode:
                 raise ValueError(
-                    f"{task}: relaunch did not complete; retry resume to reconcile the original endpoint and transaction"
+                    f"{task}: relaunch did not complete; retry aheadfull to reconcile the original endpoint and transaction"
                 )
             self.wait_for_turn(task, tx)
         self.receipt["phase"] = "complete"

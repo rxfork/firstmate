@@ -45,7 +45,7 @@ fm_vessel_guard_mutation() {  # <script> [args...]; re-exec once under a shared 
     receipt="${FM_STATE_OVERRIDE:-$FM_ANCHOR/.firstmate/$name/state}/.vessel-recovery.json"
     if [ -e "$receipt" ] || [ -L "$receipt" ]; then
       if [ -L "$receipt" ] || ! jq -e '.body.phase == "complete"' "$receipt" >/dev/null; then
-        printf 'error: vessel recovery is pending; finish fullstop/resume before mutating tasks\n' >&2
+        printf 'error: vessel recovery is pending; finish allstop/aheadfull before mutating tasks\n' >&2
         return 1
       fi
     fi

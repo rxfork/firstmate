@@ -367,7 +367,7 @@ Before handoff, supervision can find the exact lease even if Treehouse's allocat
 After handoff, missing metadata is an ownership exception rather than evidence that the work is disposable.
 Automatic vessel cleanup stops when remote ownership cannot be verified and leaves the record and working copy for operator reconciliation.
 Failed Orca launches and ambiguous validation or endpoint ownership retain their records and surface a recoverable exception rather than retrying a destructive command.
-Vessel fullstop stop proofs remain with the vessel recovery owner, not the task cleanup scan.
+Vessel allstop stop proofs remain with the vessel recovery owner, not the task cleanup scan.
 Remote validation and the remote-job service own their own allocations; task cleanup does not sweep the account's process table for remote service workers.
 The vessel owns its supervisor and warmed/shared project caches, the secondmate registry owns persistent secondmate homes, and task reports and exported evidence follow the existing durable data retention rules.
 Local branch pruning does not grant remote branch deletion authority; forge-side source-branch retention and the merge command's option boundary remain separate.

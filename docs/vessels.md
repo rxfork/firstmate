@@ -190,26 +190,26 @@ Force-killing can interrupt writes; use a service's own shutdown interface when 
 bash bin/fm-anchor.sh status --anchor /absolute/anchor
 # Request local stopping without transferring or deleting working state:
 bash bin/fm-raise-anchor.sh --anchor /absolute/anchor
-# Or use the core fullstop command directly:
-bash bin/fm-anchor.sh fullstop --anchor /absolute/anchor
+# Or use the core allstop command directly:
+bash bin/fm-anchor.sh allstop --anchor /absolute/anchor
 # Recover workers without opening the primary (the personal launcher calls this via aheadfull):
-bash bin/fm-anchor.sh resume --anchor /absolute/anchor
+bash bin/fm-anchor.sh aheadfull --anchor /absolute/anchor
 ```
 
-Local fullstop checkpoints the vessel's tmux server and pane identities and the worker's isolated directory and instruction reference in a private receipt under the vessel state directory.
+Local allstop checkpoints the vessel's tmux server and pane identities and the worker's isolated directory and instruction reference in a private receipt under the vessel state directory.
 It records confirmed worker stops before removing the server; an unavailable socket alone is not evidence of a stop.
-Resume leaves a positively identified live original worker alone and recreates proven-stopped endpoints in their recorded tmux sessions.
+`aheadfull` leaves a positively identified live original worker alone and recreates proven-stopped endpoints in their recorded tmux sessions.
 Each worker uses the existing relaunch transaction in its recorded worktree.
 Completed and validation-waiting tasks are not relaunched, and a validation daemon that was running is restarted and checked without submitting another validation.
 Scout promotion and review parking cannot change task records while vessel recovery owns them.
 The personal launcher's `aheadfull` runs recovery without opening Pi.
-`firstmate launch` checks for a fullstop receipt and requires recovery to succeed before opening Pi.
+`firstmate launch` checks for an allstop receipt and requires recovery to succeed before opening Pi.
 Project-specific services outside the vessel's managed lifecycle are not automatically restarted.
 A replacement is confirmed only after an incarnation-bound native turn signal; missing acknowledgement alone never triggers a second launch.
-If a replacement exits, retry resume on the same harbor: it can relaunch into the same verified, stopped pane or leave the worker stopped if it is now done or awaiting validation.
-Use fullstop to stop a partially resumed vessel again; it rechecks present workers and preserves verified stops for workers that had not restarted.
+If a replacement exits, retry `aheadfull` on the same harbor: it can relaunch into the same verified, stopped pane or leave the worker stopped if it is now done or awaiting validation.
+Use `allstop` to stop a partially resumed vessel again; it rechecks present workers and preserves verified stops for workers that had not restarted.
 
-For a legacy task without a receipt, reconnect its original vessel tmux server at the recorded vessel socket and run fullstop while its endpoint is still verifiable.
+For a legacy task without a receipt, reconnect its original vessel tmux server at the recorded vessel socket and run `allstop` while its endpoint is still verifiable.
 If that server was already discarded, there is no supported automatic recovery from the task record alone; leave the record and working copy intact and reconcile the original worker's history instead of making a lookalike pane or editing the record.
 A reused socket, foreign receipt or unverifiable worker stop still prevents replay.
 An already stopped vessel can sail without restarting its workers.

@@ -57,7 +57,7 @@ shutil.copytree(
 )
 cli = ["bash", str(core / "bin/fm-anchor.sh")]
 target = ["--anchor", str(anchor)]
-stop = [*cli, "fullstop", *target]
+stop = [*cli, "allstop", *target]
 launch = [
     *cli,
     "open",
@@ -66,7 +66,7 @@ launch = [
     "pi",
     "--",
     *cli,
-    "resume",
+    "aheadfull",
     *target,
     "--if-pending",
     "--",
@@ -236,7 +236,7 @@ try:
         timeout=25,
     )
     assert reopened.returncode == 0, (
-        f"Pi {version}: installed core could not reopen after fullstop: {reopened.stderr}"
+        f"Pi {version}: installed core could not reopen after allstop: {reopened.stderr}"
     )
     (state / ".lock").write_text(str(unrelated.pid) + "\n")
     refused = subprocess.run(
@@ -252,7 +252,7 @@ try:
         "an unverified primary was signalled or ignored"
     )
     print(
-        "Source coordination, request deduplication, history retention, process isolation and reopen after fullstop passed"
+        "Source coordination, request deduplication, history retention, process isolation and reopen after allstop passed"
     )
 finally:
     for child in (writer, unrelated, process):
