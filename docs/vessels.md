@@ -29,13 +29,16 @@ New names can be selected without first appearing in that list.
 Secondmates remain delegated supervisors, not independent vessels; this interface does not relocate their homes or rewrite remote routes.
 Only files within the selected payload are transported.
 
-### Private compute context
+### Shared vessel rules
 
-Place private compute-provider instructions in `<anchor>/.firstmate/.agents/compute.md`.
-The shared session-start digest loads this optional file; `bin/fm-session-start.sh` owns loading and diagnostics.
-The file may be managed separately with chezmoi, but do not manage `.firstmate` as an exact directory that removes vessel data.
-It is anchor-local, not part of any vessel payload, so install it separately on each harbor.
-Keep credentials out of the file; loading instructions does not provision capacity or authorize spending by itself.
+Put standing rules for every Firstmate vessel at the same anchor in `<anchor>/.firstmate/AGENTS.md`.
+`bin/fm-session-start.sh` includes this optional file in the startup digest.
+These rules supplement Firstmate's tracked supervisor contract; they do not replace it or grant new authority.
+The digest no longer loads `.firstmate/.agents/compute.md` automatically. Move standing compute rules into `AGENTS.md` or use it to tell Firstmate when to read a separate file.
+
+The rules live outside every vessel payload, so scuttling a vessel leaves them in place and sailing does not copy them. Install them separately on each harbor.
+You can manage them with chezmoi, but do not manage `.firstmate` as an exact directory that removes vessel data.
+Keep credentials out of these files. Compute instructions do not provision capacity or authorize spending.
 
 ## Local setup
 

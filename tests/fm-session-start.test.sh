@@ -818,40 +818,41 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
-test_anchor_compute_context() {
+test_anchor_shared_context() {
   local rec root home fakebin anchor out
-  rec=$(new_world anchor-compute)
+  rec=$(new_world anchor-context)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   anchor="${root%/root}/anchor with spaces"
-  mkdir -p "$anchor/.firstmate/.agents"
-  printf '%s\n' 'Use the private compute provider.' > "$anchor/.firstmate/.agents/compute.md"
+  mkdir -p "$anchor/.firstmate"
+  local rules="$anchor/.firstmate/AGENTS.md"
+  printf '%s\n' 'Use the shared operating rules.' > "$rules"
 
   out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "$anchor/.firstmate/.agents/compute.md (private compute instructions)" "compute context path missing"
-  assert_contains "$out" 'Use the private compute provider.' "compute instructions were not loaded"
+  assert_contains "$out" "$rules (shared vessel rules)" "shared rules path missing"
+  assert_contains "$out" 'Use the shared operating rules.' "shared rules were not loaded"
 
   out=$(FM_ANCHOR="$anchor" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START" --reemit)
-  assert_contains "$out" 'Use the private compute provider.' "context re-emit dropped compute instructions"
+  assert_contains "$out" 'Use the shared operating rules.' "context re-emit dropped shared rules"
 
   out=$(FM_ANCHOR='' run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_not_contains "$out" 'Use the private compute provider.' "non-vessel start discovered anchor context"
+  assert_not_contains "$out" 'Use the shared operating rules.' "non-vessel start discovered shared rules"
 
-  : > "$anchor/.firstmate/.agents/compute.md"
+  : > "$rules"
   out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" '(present, empty)' "empty compute context was not distinguished"
+  assert_contains "$out" '(present, empty)' "empty shared rules were not distinguished"
 
-  rm "$anchor/.firstmate/.agents/compute.md"
+  rm "$rules"
   out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "$anchor/.firstmate/.agents/compute.md (private compute instructions)" "optional missing compute context not labeled"
+  assert_contains "$out" "$rules (shared vessel rules)" "optional missing shared rules not labeled"
 
-  mkdir "$anchor/.firstmate/.agents/compute.md"
+  mkdir "$rules"
   out=$(FM_ANCHOR="$anchor" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" 'UNREADABLE: expected a readable regular file' "invalid compute context silently ignored"
-  pass "anchor compute context loads on startup and re-emit without cwd discovery"
+  assert_contains "$out" 'UNREADABLE: expected a readable regular file' "invalid shared rules silently ignored"
+  pass "anchor rules load on startup and re-emit without cwd discovery"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -3131,7 +3132,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
-test_anchor_compute_context
+test_anchor_shared_context
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
