@@ -1,7 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, on an actionable blocker or cleanup refusal, during supervision reviews of unresolved blockers or failed cleanup, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
+  Load when the session-start digest reports an ordinary direct report's endpoint dead, unverified, or not recorded, on an actionable blocker or cleanup refusal, during supervision reviews of unresolved blockers or failed cleanup, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, after observing a defeated Claude or Codex bypass, and when a live crewmate reports its no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -9,7 +9,7 @@ metadata:
 
 # stuck-crewmate-recovery
 
-Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
+Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead, unverified, or not recorded, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`AGENTS.md` section 7 for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
 
 A lane parked on review (`bin/fm-crew-state.sh` reads `source: review-park`) stopped its agent on purpose and is not a recovery case; relaunch it only through `bin/fm-park.sh resume`.
@@ -36,6 +36,8 @@ Revisit unresolved blockers and failed cleanup during existing supervision revie
 Repeated unchanged evidence calls for reassessing the recovery path, not another identical retry or progress report.
 Preserve unanswered decisions through the existing decision and reminder mechanisms rather than repeating unchanged notifications.
 A durable blocked record alone is not a next action.
+Scope the blocker to the affected task and its dependents, and continue unrelated supervision and authorized work within existing locks and capacity limits.
+If a shared prerequisite actually blocks other work, name that prerequisite and which work it blocks.
 
 Recovery preserves all existing safety and authority boundaries: keep unlanded work, ownership evidence, validation ownership, authentication, required checks, and merge authority intact.
 A refusal does not authorize force, discard, rewriting ownership records to pass a guard, duplicate workers or validation runs, arbitrary restarts, unlimited retries, or expanded project scope.
@@ -68,7 +70,9 @@ Before relaunch, prove that no live agent still owns the recorded task and that 
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
 A HERDR endpoint that is not merely idle but destroyed - a pane or workspace removed in Herdr churn - is recovered by that same relaunch, which creates one fresh endpoint in the existing worktree and rebinds the task's record to it; nothing special is needed, and the worktree is untouched ([`docs/agent-control.md`](../../../docs/agent-control.md) "Reclaiming a task whose endpoint is gone").
 That relaunch proves the endpoint is destroyed before it rebinds, so a Herdr server that was merely stopped is adopted back rather than duplicated.
-On tmux there is no reclaim: a task record carries no socket identity for its endpoint, so a `missing` window cannot be told apart from one on a tmux server this seat cannot address, and both `exit` and `relaunch` refuse.
+For a local vessel tmux endpoint reported unverified, use the normal relaunch command after checking current task and validation ownership as above; it checks the original terminal session before creating a replacement.
+If it finds a surviving process or lacks the original identity, preserve the work, use the reported evidence to look for the original endpoint, and apply Blocker ownership before escalating.
+See the [endpoint reclaim contract](../../../docs/agent-control.md#reclaiming-a-task-whose-endpoint-is-gone).
 On T3 Code there is no replacement relaunch: the thread keeps its conversation, so a turn or provider change continues the same agent; preserve the task record and worktree and follow [`docs/t3code-backend.md`](../../../docs/t3code-backend.md#restart-and-liveness-behavior) instead of trying to respawn it.
 Do not work around these refusals by respawning; preserve the recorded task and follow the backend's recovery contract.
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.

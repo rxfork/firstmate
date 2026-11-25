@@ -2576,7 +2576,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR and REX can prove it:
+  # inferred from a failed read:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
@@ -2588,18 +2588,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           `unreadable` is rechecked too, because a stopped Rex server
   #           reads as unreachable to a read that never starts it
   #           (fm_control_absence_recheck_applies owns that rule).
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
+  #   vessel tmux - verify the original Linux terminal session is gone.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_control_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
   if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
@@ -5105,6 +5100,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = tmux ]; then
+    # The shared absence proof above verified the old terminal session is gone.
+    SES=${RELAUNCH_TARGET%%:*}
+    T=$RELAUNCH_TARGET
+    vessel_socket="${TMUX_TMPDIR:?}/tmux-$(id -u)/default"
+    if [ -n "${TMUX:-}" ]; then
+      echo "error: refusing to reclaim into ambient tmux instead of $vessel_socket" >&2
+      exit 1
+    fi
+    tmux -S "$vessel_socket" has-session -t "=$SES" 2>/dev/null \
+      || tmux -S "$vessel_socket" new-session -d -s "$SES" -c "$FM_HOME" || exit 1
+    if [ "$(tmux display-message -p '#{socket_path}')" != "$vessel_socket" ]; then
+      echo "error: cannot prove this reclaim is using the vessel tmux socket $vessel_socket" >&2
+      exit 1
+    fi
+    WT_TARGET=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
   elif [ "$BACKEND" = rex ]; then
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -5156,8 +5167,8 @@ EOF
     #
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument). tmux and every secondmate were already refused, and rex
-    # took the branch above, so there is no dispatch left to make.
+    # that argument). The other supported backends took their branches above
+    # and every secondmate was already refused.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -7528,10 +7539,20 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+TMUX_WORKER_TERMINAL=
+if [ "$BACKEND" = tmux ] && [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
+  if ! TMUX_WORKER_TERMINAL=$(fm_control_tmux_worker_record "$WT_TARGET"); then
+    if [ "$RELAUNCH" -eq 1 ] && [ -n "$(fm_meta_get "$RELAUNCH_META" tmux_worker_terminal)" ]; then
+      echo "error: could not verify the terminal identity for $ID's replacement; keeping the prior task record" >&2
+      exit 1
+    fi
+    echo "warning: cannot record $ID's terminal identity; recovery after loss of its tmux window will be unavailable" >&2
+  fi
+fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window tmux_worker_terminal endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7539,6 +7560,7 @@ preserve_relaunch_meta() {
 }
 {
   echo "window=$META_WINDOW"
+  [ -z "$TMUX_WORKER_TERMINAL" ] || echo "tmux_worker_terminal=$TMUX_WORKER_TERMINAL"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"

@@ -947,14 +947,22 @@ for meta in "$STATE"/*.meta; do
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0
     fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
-    # Only the timeout owner's own statuses mean the read itself failed: 124 is
-    # the bound firing and >=128 is a signal death. Every other nonzero status
-    # is the probe's own verdict that the endpoint is gone.
-    if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+    # 124 is the probe deadline and >=128 is signal death.
+    if [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
       printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
         "$backend" "$window" "$ENDPOINT_TIMEOUT"
+    elif [ "$backend" = tmux ]; then
+      if [ "$endpoint_rc" -eq 0 ]; then
+        printf 'endpoint: present (backend=tmux window=%s)\n' "$window"
+      else
+        # The ambient server is not necessarily the one that launched this task.
+        printf 'endpoint: unverified (backend=tmux window=%s)\n' "$window"
+        case "$(fm_meta_get "$meta" kind)" in
+          ""|ship|scout) printf 'recovery: follow stuck-crewmate-recovery for this task.\n' ;;
+        esac
+      fi
+    elif [ "$endpoint_rc" -eq 0 ]; then
+      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi

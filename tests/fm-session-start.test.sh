@@ -1370,7 +1370,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: present (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
     "the later fleet read should still see the ambiguous endpoint"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
@@ -1389,7 +1389,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: unverified (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
     "the later cheap presence read should preserve the visible offline symptom"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
@@ -1443,14 +1443,17 @@ EOF
   make_fake_ps_claude "$fakebin"
   make_fake_tmux "$fakebin" "fm-sess:live-window"
 
-  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
-  printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=fm-sess:missing-window\nkind=ship\n' > "$home/state/task-a-missing.meta"
+  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-z-present.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: unverified (backend=tmux window=fm-sess:missing-window)" "missing tmux endpoint not reported as unverified"
+  assert_contains "$out" "stuck-crewmate-recovery for this task" "tmux uncertainty did not route to task-local recovery"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux" "missing tmux window was reported as proof of death"
+  assert_contains "$out" "endpoint: present (backend=tmux window=fm-sess:live-window)" "a missing window hid a later tmux endpoint"
+  assert_contains "$out" "NEXT STEP" "a missing window cut off session startup"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  pass "tmux startup reports one missing window as task-local uncertainty and continues the digest"
 }
 
 test_endpoint_liveness_herdr() {

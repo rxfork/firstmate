@@ -396,6 +396,35 @@ fm_control_backend_relaunch_supported() {  # <backend>
   return 1
 }
 
+# An anchored launch records its Linux terminal session, not just its tmux label.
+fm_control_tmux_worker_record() {  # <target>
+  local pane
+  pane=$(tmux display-message -p -t "$1" '#{pane_pid}') || return 1
+  python3 "$(dirname "${BASH_SOURCE[0]}")/fm-tmux-worker.py" record "$pane"
+}
+
+fm_control_tmux_worker_gone() {  # <recorded terminal session>
+  python3 "$(dirname "${BASH_SOURCE[0]}")/fm-tmux-worker.py" gone "$1"
+}
+
+fm_control_agent_state() {  # <backend> <target> <meta>
+  local raw terminal current
+  raw=$(fm_backend_agent_state "$1" "$2") || return 1
+  if [ "$1" = tmux ] && [ -n "${FM_ANCHOR:-}" ] && [ -z "${FM_VESSEL_RELAUNCH_TX:-}" ] &&
+    [[ "$raw" = alive || "$raw" = dead ]]; then
+    terminal=$(fm_meta_get "$3" tmux_worker_terminal)
+    if [ -n "$terminal" ]; then
+      current=$(fm_control_tmux_worker_record "$2" 2>/dev/null) || current=
+      if [ "$current" != "$terminal" ] &&
+        { [ "$raw" != dead ] || [ -z "$current" ] || ! fm_control_tmux_worker_gone "$terminal" >/dev/null 2>&1; }; then
+        printf 'ambiguous'
+        return 0
+      fi
+    fi
+  fi
+  printf '%s' "$raw"
+}
+
 # Whether a raw fm_backend_agent_state reading on <backend> goes through
 # fm_control_endpoint_absence_verdict before a recovery verb (exit, relaunch)
 # acts or refuses. `missing` always does. A Rex `unreadable` does too: Rex's
@@ -453,13 +482,8 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   Vessel tmux requires the original worker's Linux terminal session to be
+#     gone in the recorded boot/namespace. A window name alone proves nothing.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -469,7 +493,15 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      local terminal reason
+      terminal=$(fm_meta_get "$meta" tmux_worker_terminal)
+      if [ -z "${FM_ANCHOR:-}" ] || [ -z "$terminal" ]; then
+        printf 'unproven\ttmux has no recorded terminal identity for this worker; a missing window does not prove the worker stopped'
+      elif reason=$(fm_control_tmux_worker_gone "$terminal" 2>&1); then
+        printf 'gone\t'
+      else
+        printf 'unproven\t%s' "$reason"
+      fi
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is

@@ -50,11 +50,9 @@
 #              `already-stopped`, because the endpoint this verb normally
 #              preserves did not survive; a pane that turns out to be there and
 #              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              takes the ordinary interrupt-then-exit path. Anchored tmux
+#              checks whether the recorded Linux terminal session still has a
+#              live process; a missing window on its own is not proof.
 #              Refused on t3code before anything is sent: T3's `/mcp` tools
 #              have no session stop (bin/fm-control-lib.sh
 #              fm_control_backend_exit_supported); interrupt ends its turn.
@@ -70,9 +68,8 @@
 #              placement), and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              answer. A local vessel tmux worker can also be reclaimed once
+#              its recorded terminal session is verified gone.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -417,7 +414,7 @@ fi
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_control_agent_state "$BACKEND" "$T" "$META"
 }
 
 busy_verdict() {

@@ -61,6 +61,7 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+[ "${1:-}" != -S ] || shift 2
 case "${1:-}" in
   send-keys)
     shift
@@ -108,6 +109,8 @@ case "${1:-}" in
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *'#{pane_pid}'*) [ -f "$D/pane-pid" ] && cat "$D/pane-pid"; exit 0 ;;
+        *'#{socket_path}'*) printf '%s/tmux-%s/default\n' "${TMUX_TMPDIR:-/tmp}" "$(id -u)"; exit 0 ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
@@ -2761,6 +2764,70 @@ test_tmux_refuses_when_the_server_is_gone() {
   pass "tmux: a dead server on this socket refuses both verbs rather than proving absence"
 }
 
+test_vessel_reclaims_a_missing_tmux_worker() (
+  [ "$(uname -s)" = Linux ] || exit 0
+  local dir anchor vessel id="vessel-tmux-$$" wt out rc=0 old child new
+  dir=$(new_case missing-vessel-worker "$id")
+  anchor="$dir/anchor"
+  mkdir -p "$anchor"
+  env -u TREEHOUSE_ROOT -u NM_HOME -u LAVISH_AXI_STATE_DIR -u PI_CODING_AGENT_SESSION_DIR \
+    bash "$ROOT/bin/fm-anchor.sh" init --anchor "$anchor" --agent pi >/dev/null || fail 'could not initialize fixture vessel'
+  vessel="$anchor/.firstmate/flagship"
+  rmdir "$dir/home/state" "$dir/home/data" "$dir/home"
+  ln -s "$vessel" "$dir/home"
+  mkdir -p "$vessel/projects/proj"
+  ln -s "$vessel/projects/proj" "$dir/proj"
+  wt="$vessel/worktrees/$id"
+  add_ship_task "$dir" "$id" pi fmses "$wt"
+  export FM_ANCHOR="$anchor" FM_VESSEL=flagship FM_BACKEND=tmux
+  export TREEHOUSE_ROOT="$vessel/worktrees" NM_HOME="$vessel/no-mistakes"
+  export TMUX_TMPDIR="$vessel/tmux" LAVISH_AXI_STATE_DIR="$vessel/lavish-axi" PI_CODING_AGENT_SESSION_DIR="$vessel/pi/sessions"
+
+  python3 -c 'import os, subprocess, sys, time; os.setsid(); child = subprocess.Popen(["/bin/sleep", "90"]); open(sys.argv[1], "w").write(str(child.pid)); time.sleep(90)' "$dir/fake/child-pid" & old=$!
+  python3 -c 'import os, sys, time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(90)' "$dir/fake/pane-pid" & new=$!
+  trap 'child=$(< "$dir/fake/child-pid"); kill "$old" "$new" ${child:+"$child"} 2>/dev/null || true; wait "$old" "$new" 2>/dev/null || true; fm_test_remove_tree "/tmp/fm-$id"' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$dir/fake/child-pid" ] && [ -s "$dir/fake/pane-pid" ] && break
+    /bin/sleep .02
+  done
+  [ -s "$dir/fake/child-pid" ] && [ -s "$dir/fake/pane-pid" ] || fail 'isolated fixture terminal did not start'
+  child=$(< "$dir/fake/child-pid")
+  printf 'tmux_worker_terminal=%s:%s:%s\n' "$(< /proc/sys/kernel/random/boot_id)" "$(stat -Lc %i /proc/self/ns/pid)" "$old" >> "$dir/home/state/$id.meta"
+  printf 'preserve local edits\n' > "$wt/dirty.txt"
+  printf 'bash' > "$dir/fake/command"
+  printf 'pi' > "$dir/fake/becomes"
+  strand_endpoint "$dir" "$id"
+
+  out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
+  expect_code 1 "$rc" "a missing pane must not hide a live worker"
+  assert_contains "$out" "original terminal session $old still has a live process" 'refusal did not identify the old terminal'
+  assert_absent "$dir/fake/created-windows" 'refusal created a duplicate window'
+
+  kill "$old"
+  wait "$old" 2>/dev/null || true
+  rc=0
+  out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
+  expect_code 1 "$rc" 'a child in the original terminal must prevent reclaim even after its leader exits'
+  assert_contains "$out" "(PID $child)" 'refusal did not identify the surviving process'
+  assert_absent "$dir/fake/created-windows" 'surviving child did not prevent a duplicate window'
+
+  kill "$child"
+  for _ in $(seq 1 100); do
+    [[ ! -r "/proc/$child/stat" ]] || [[ "$(< "/proc/$child/stat")" == *') Z '* ]] && break
+    /bin/sleep .02
+  done
+  rc=0
+  out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
+  expect_code 0 "$rc" "relaunch should recover a worker whose original terminal session is gone"$'\n'"$out"
+  [ "$(< "$dir/fake/created-windows")" = "fm-$id" ] || fail 'relaunch did not create exactly one replacement window'
+  [ "$(meta_field "$dir" "$id" worktree)" = "$wt" ] || fail 'reclaim changed the recorded local copy'
+  [ "$(< "$wt/dirty.txt")" = 'preserve local edits' ] || fail 'reclaim discarded local edits'
+  [ "$(meta_field "$dir" "$id" tmux_worker_terminal | awk -F: '{print $NF}')" = "$new" ] || fail 'replacement did not record its own terminal session'
+  out=$(run_control "$dir" "$id" relaunch --note 'Use the same local copy.') || fail "ordinary relaunch after recovery failed: $out"
+  [ "$(< "$dir/fake/created-windows")" = "fm-$id" ] || fail 'repeating relaunch created a second window'
+  pass "vessel tmux: missing window does not hide a live worker and a proven-gone worker can relaunch in place"
+)
+
 test_reclaim_refuses_an_unreadable_endpoint() {
   local dir out rc
   dir=$(new_case gone-unreadable rl63)
@@ -3402,6 +3469,7 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_vessel_reclaims_a_missing_tmux_worker
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
