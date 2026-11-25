@@ -1400,7 +1400,7 @@ recovery_fixture() {
   mkdir -p "$anchor" "$1/core/bin" "$1/fakebin"
   configure "$anchor"
   bash "$ANCHOR_CLI" init --anchor "$anchor" --agent pi >/dev/null
-  cp "$ROOT/bin/"fm-{anchor.sh,vessel.py,vessel-lock-lib.sh,busy-lib.sh} "$ROOT/bin/"fm_{raise_anchor,vessel_recovery}.py "$1/core/bin/"
+  cp "$ROOT/bin/"fm-{anchor.sh,vessel.py,vessel-lock-lib.sh,busy-lib.sh,wake-lib.sh,path-lib.sh} "$ROOT/bin/"fm_{raise_anchor,vessel_recovery}.py "$1/core/bin/"
   for dir in 'fakebin/tmux tmux' 'fakebin/no-mistakes daemon' 'core/bin/fm-control.sh control' 'core/bin/fm-watch-arm.sh watch' 'core/bin/fm-crew-state.sh crew'; do
     read -r tool mode <<< "$dir"
     printf '#!/bin/sh\nexec python3 "%s/tests/fixtures/fm-vessel-recovery.py" %s "$@"\n' "$ROOT" "$mode" > "$1/$tool"
@@ -1631,10 +1631,12 @@ dead_published_worker_can_resume_in_place() (
   [ "$(< "$world/launches")" = dirty ] || fail 'ambiguous recovery duplicated the worker'
 
   recovery_set_dirty_pane_state "$world" dead
-  touch "$world/fail-before-launch"
-  if output=$(bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1); then fail 'old launch acknowledgement allowed launch'; fi
+  touch "$world/ambiguous-before-publication"
+  if output=$(bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1); then fail 'an ambiguous failed retry allowed launch'; fi
   assert_contains "$output" 'fixture interrupted before publishing the replacement' "resume did not retry the proven-dead worker: $output"
-  [ ! -e "$world/primary" ] && [ "$(< "$world/launches")" = dirty ] || fail 'a failed retry was credited as a new launch'
+  [ ! -e "$world/primary" ] && [ "$(< "$world/launches")" = dirty ] || fail 'an ambiguous failed retry was credited as a new launch'
+  [ ! -e "$FM_STATE_OVERRIDE/.wake-queue" ] || fail 'ambiguous worker was handed off as stopped'
+  recovery_set_dirty_pane_state "$world" dead
   output=$(bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1) \
     || fail "a proven-dead replacement blocked launch: $output"
   bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" || fail 'repeated resume after retry failed'
@@ -1655,6 +1657,26 @@ replacement_now_waiting_stays_parked() (
     || fail "a replacement with new validation ownership blocked launch: $output"
   [ -f "$world/primary" ] && [ "$(< "$world/launches")" = dirty ] || fail 'resume relaunched a worker now held by validation'
   pass 'a worker now awaiting validation stays parked on retry after its published replacement exits'
+)
+
+completed_backlog_refusal_does_not_block_launch() (
+  local world="$TMP_ROOT/skip-done" output
+  local recovery_server recovery_replacement recovery_pane recovery_socket recovery_cli
+  recovery_fixture "$world"
+  recovery_add_task "$world" later firstmate
+  bash "$recovery_cli" allstop --anchor "$FM_ANCHOR" > "$world/stop" || fail 'initial allstop did not verify shutdown'
+  touch "$world/dirty-backlog-done"
+  output=$(bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" --if-pending -- touch "$world/primary" 2>&1) \
+    || fail "a stopped worker with a completed backlog item blocked launch: $output"
+  [ -f "$world/primary" ] && [ "$(< "$world/launches")" = later ] || fail 'recovery did not open the primary and start the later worker'
+  assert_contains "$output" 'dirty: relaunch deferred' 'recovery did not explain the worker was skipped'
+  jq -e '.panes["firstmate:fm-dirty"].state == "dead"' "$world/tmux.json" >/dev/null || fail 'deferred worker is not stopped'
+  [ "$(< "$TREEHOUSE_ROOT/dirty/file")" = 'unsaved edits' ] || fail 'recovery discarded local work'
+  assert_contains "$(< "$FM_STATE_OVERRIDE/.wake-queue")" 'check: vessel recovery: dirty: relaunch deferred' 'primary was not notified about the deferred worker'
+  bash "$recovery_cli" aheadfull --anchor "$FM_ANCHOR" || fail 'repeated resume failed'
+  [ "$(wc -l < "$FM_STATE_OVERRIDE/.wake-queue")" -eq 1 ] && [ "$(< "$world/launches")" = later ] \
+    || fail 'repeated resume duplicated a notification or a worker'
+  pass 'a completed backlog item cannot block recovery of later workers or the primary'
 )
 
 interrupted_resume_can_allstop_again() (
@@ -1686,4 +1708,4 @@ interrupted_resume_can_allstop_again() (
   pass 'allstop can reconcile interrupted resume without forgetting workers that had not restarted yet'
 )
 
-fm_test_run arrival_resumes_workers_with_no_tmux_socket_directory sailing_reuses_verified_allstop pushing_reuses_empty_allstop dead_published_worker_can_resume_in_place replacement_now_waiting_stays_parked interrupted_resume_can_allstop_again resume_recreates_recorded_tmux_sessions stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses allstop_resume_replays_owned_work_once interrupted_allstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity
+fm_test_run completed_backlog_refusal_does_not_block_launch arrival_resumes_workers_with_no_tmux_socket_directory sailing_reuses_verified_allstop pushing_reuses_empty_allstop dead_published_worker_can_resume_in_place replacement_now_waiting_stays_parked interrupted_resume_can_allstop_again resume_recreates_recorded_tmux_sessions stopped_vessel_refuses_scout_promotion stopped_vessel_refuses_review_resume_without_writes stale_tmux_socket_does_not_block_recovery legacy_stop_without_evidence_refuses allstop_resume_replays_owned_work_once interrupted_allstop_retains_the_original_worker host_xdg_paths_are_preserved shell_startup_does_not_poison_sailing interrupted_copy_can_retry_without_cleanup legacy_cache_records_remain_usable interrupted_initialization_resumes projects_use_main_then_master_or_skip sailing_can_cancel_without_losing_work source_stop_refusal_can_cancel_before_registration cancellation_revokes_delayed_activation opening_offers_sailing_recovery opening_initializes_and_preserves_runtime_arguments opening_refusals_do_not_launch_or_adopt_state opening_sails_new_and_registered_vessels interactive_scuttling_requires_exact_confirmation named_vessels_are_independent vessel_names_and_layout_are_validated named_vessels_sail_independently vessel_project_failures_block_launch_and_can_retry vessel_projects_clone_origins_only_when_missing scuttling_waits_for_requested_primary_cleanup scuttling_requires_confirmation_and_preserves_outside_files scuttling_refuses_live_work_and_its_own_primary scuttling_a_cache_does_not_touch_other_harbors replaced_anchor_locks_are_rejected pushing_anchors_the_destination_without_reverse_ssh pushing_retries_copy_and_activation_failures pushing_lost_activation_ack_never_overwrites_active_work pushing_rejects_conflicts_and_its_own_primary pushing_unknown_work_refuses_without_killing_it sailing_stops_registered_work_without_discarding_state unavailable_sources_report_the_payload_reason source_stop_errors_preserve_the_refusal_reason unknown_source_work_blocks_copy_without_killing_it inactive_cache_is_not_an_authoritative_source harbor_names_are_lowercase_and_unique pending_arrival_never_exports_its_cache sailing_does_not_confuse_ssh_aliases_with_multiple_holders sailing_copies_and_redirects_origin sailing_follows_hints_and_syncs_inactive_cache failed_copy_can_retry_without_launching lost_origin_ack_does_not_activate_destination sailing_falls_back_when_last_known_is_unreachable sailing_never_adopts_an_unrelated_vessel sailing_refuses_conflicting_anchored_copies sailing_refuses_source_changes_before_copy core_environment_composes_forwarding_layers unanchored_launch_is_refused local_anchor_records_options_and_preserves_argv boarding_gate_never_repairs_metadata options_and_unregistered_work_are_preserved anchor_operations_use_one_regular_lock raising_anchor_prompts_without_moving_or_deleting_work sailing_confirms_remote_process_shutdown_before_copying stale_process_approvals_never_signal_a_new_identity

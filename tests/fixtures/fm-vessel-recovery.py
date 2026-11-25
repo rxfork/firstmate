@@ -124,8 +124,14 @@ elif mode == "control":
         assert f"control_relaunch_tx={tx}" not in meta.read_text().splitlines(), (
             "reusing a published transaction would credit the old launch"
         )
-        if (world / "fail-before-launch").exists():
-            (world / "fail-before-launch").unlink()
+        if (world / f"{task}-backlog-done").exists():
+            sys.exit(
+                f"error: this home's backlog item {task} is not dispatchable in state done no no"
+            )
+        if (world / "ambiguous-before-publication").exists():
+            (world / "ambiguous-before-publication").unlink()
+            pane["state"] = "ambiguous"
+            save()
             sys.exit("fixture interrupted before publishing the replacement")
         with (world / "launches").open("a") as stream:
             stream.write(task + "\n")

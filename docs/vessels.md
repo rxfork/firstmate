@@ -206,7 +206,10 @@ Each worker uses the existing relaunch transaction in its recorded worktree.
 Completed and validation-waiting tasks are not relaunched, and a validation daemon that was running is restarted and checked without submitting another validation.
 Scout promotion and review parking cannot change task records while vessel recovery owns them.
 The personal launcher's `aheadfull` runs recovery without opening Pi.
-`firstmate launch` checks for an allstop receipt and requires recovery to succeed before opening Pi.
+When a relaunch fails without publishing a new worker and its original or recovery-owned pane is verified stopped, recovery leaves that worker stopped, preserves its local work, notifies the primary, and continues with the remaining workers.
+`firstmate launch` opens Pi after recovery finishes, including when a verified stopped worker was deferred.
+Review a deferred worker's relaunch record and backlog before retrying that worker individually.
+An unverified endpoint or ambiguous relaunch still blocks automatic recovery.
 Project-specific services outside the vessel's managed lifecycle are not automatically restarted.
 A replacement is confirmed only after an incarnation-bound native turn signal; missing acknowledgement alone never triggers a second launch.
 If a replacement exits, retry `aheadfull` on the same harbor: it can relaunch into the same verified, stopped pane or leave the worker stopped if it is now done or awaiting validation.

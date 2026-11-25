@@ -343,6 +343,7 @@ class Recovery:
                 ):
                     tasks[task] = prior.copy()
                     tasks[task].pop("retry_tx", None)
+                    tasks[task].pop("deferred", None)
                     continue
                 raise ValueError(
                     f"{task}: original endpoint {endpoint} not found on {self.socket}; no verified stop receipt. Reconnect its original server and retry allstop; do not recreate a lookalike window"
@@ -540,7 +541,7 @@ fm_busy_source_trusted "$4" "$source"
                     raise ValueError("vessel validation daemon did not become healthy")
                 time.sleep(0.25)
         for task, entry in self.receipt["tasks"].items():
-            if entry["validation_wait"]:
+            if entry["validation_wait"] or entry.get("deferred"):
                 continue
             endpoint = entry["identity"]["endpoint"]
             current = panes.get(endpoint, [])
@@ -659,11 +660,48 @@ fm_busy_source_trusted "$4" "$source"
                 SCRIPTS / "fm-control.sh", task, "relaunch", "--note", NOTE, check=False
             )
             if result.returncode:
-                raise ValueError(
-                    f"{task}: relaunch did not complete; retry aheadfull to reconcile the original endpoint and transaction"
+                self.check_recovery_pane(
+                    task, entry, self.panes(server).get(endpoint, []), replacement
                 )
+                if (
+                    self.check_task(task, entry, self.metadata(task))
+                    or self.agent_state(endpoint) != "dead"
+                ):
+                    raise ValueError(
+                        f"{task}: relaunch did not complete; retry aheadfull to reconcile the original endpoint and transaction"
+                    )
+                self.defer_relaunch(task, entry)
+                continue
             self.wait_for_turn(task, tx)
         self.receipt["phase"] = "complete"
+        self.save()
+
+    def defer_relaunch(self, task, entry):
+        message = (
+            f"{task}: relaunch deferred; the worker is stopped and its work is preserved. "
+            "Review its relaunch record and backlog before deciding whether to retry."
+        )
+        print(message, file=sys.stderr)
+        if self.run(
+            "bash",
+            "-c",
+            """set -eu
+. "$1/fm-wake-lib.sh"
+fm_lock_acquire_wait_max "$FM_WAKE_QUEUE_LOCK" 2
+trap 'fm_lock_release "$FM_WAKE_QUEUE_LOCK"' EXIT
+fm_wake_queued_carries_locked check "$2" "$3" || fm_wake_append_locked check "$2" "$3"
+""",
+            "bash",
+            SCRIPTS,
+            f"vessel-relaunch:{self.receipt['token']}:{task}",
+            f"check: vessel recovery: {message}",
+            check=False,
+        ).returncode:
+            print(
+                f"{task}: could not queue a notification for the primary",
+                file=sys.stderr,
+            )
+        entry.update(outcome="stopped", deferred=True)
         self.save()
 
     def wait_for_turn(self, task, tx):
