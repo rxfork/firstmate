@@ -101,6 +101,25 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+### Emergency recovery for local vessel tmux
+
+Run recovery from the owning Firstmate home after checking task and validation ownership.
+For a verified ship or scout that will not exit normally, `fm-control.sh <task-id> relaunch --emergency-stop --note '<progress>'` tries the normal agent exit when the original pane is reachable, then sends TERM and, if necessary, KILL only to verified same-user processes in that worker's terminal session.
+It never sends a signal to the shared tmux server or kills it through tmux.
+It waits for the old terminal processes to exit before the ordinary relaunch can create a replacement in the existing worktree.
+A recorded session number alone is not sufficient to signal a process: the leader's start identity must match, or a surviving process must match an identity audited by an earlier stop attempt for that terminal.
+Jobs that deliberately detached from the terminal are outside this automatic stop and must be reconciled separately if they can still write.
+
+For a legacy record without a terminal identity, first verify that the original worker and its writer jobs are stopped.
+Then the operator can run `fm-control.sh <task-id> relaunch --confirm-stopped <same-task-id> --stop-evidence '<how you verified the stop>' --note '<progress>'`.
+The attestation is not inferred from an absent window and is never supplied by automated supervision.
+It cannot override a live or ambiguous pane or be reused once a replacement has published its own identity.
+Without stop evidence, no replacement writer is started.
+
+Both paths use the per-task relaunch lock and preserve the task, branch, local changes and PR.
+The private `state/<task-id>.control-recovery.jsonl` records the operator UID and evidence or the process identities targeted by each escalation.
+An unavailable audit file prevents attestation and signaling; investigate that error before retrying.
+
 ### Reclaiming a task whose endpoint is gone
 
 A Herdr pane or workspace, or a Rex block, can be destroyed out from under a live task by churn, a session restart, or a stopped Rex server.
@@ -127,11 +146,12 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   [Rex's server-stop limits](rex-backend.md#active-limits) distinguish a restored shell from a missing block.
   A block that is still there is classified from its process view, so `dead` is adopted and `alive` refuses ([`docs/rex-backend.md`](rex-backend.md) "Cleanup and the absence proof").
   Rex's passive reads never start a server, so a stopped Rex server reads `unreadable` rather than `missing`; a Rex `unreadable` therefore goes through this recheck too, and still refuses unless the recheck settles it.
-- **Local vessel tmux can prove it with a recorded Linux terminal identity.** Vessel launches and relaunches record the pane's terminal session with its boot and PID namespace.
+- **Local vessel tmux can prove it with a recorded Linux terminal identity.** Vessel launches and relaunches record the pane's terminal session with its boot, PID namespace, and leader start time.
   When its window is missing, any surviving process in the original session prevents recovery, even if tmux no longer answers.
   In the same boot and namespace, with no remaining terminal processes, relaunch makes one new window at the vessel socket in the recorded session and reuses the existing worktree.
   This check does not cover detached services that deliberately leave the terminal session.
   An older record without that identity, a different boot or process namespace, or an unreadable process table cannot authorize a replacement by itself.
+  See [Emergency recovery](#emergency-recovery-for-local-vessel-tmux) for the explicit stop and operator attestation paths.
 - **T3 Code refuses `exit` before this proof.** Its [native status table](t3code-backend.md#restart-and-liveness-behavior) owns absence and unreadability, including an archived thread whose active run is still draining.
   T3 Code still cannot reclaim the task because a thread keeps its conversation, so no fresh agent can replace it and `relaunch` refuses before this proof can authorize a replacement.
 

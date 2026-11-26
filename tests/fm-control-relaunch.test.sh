@@ -2766,7 +2766,8 @@ test_tmux_refuses_when_the_server_is_gone() {
 
 test_vessel_reclaims_a_missing_tmux_worker() (
   [ "$(uname -s)" = Linux ] || exit 0
-  local dir anchor vessel id="vessel-tmux-$$" wt out rc=0 old child new
+  local dir anchor vessel id="vessel-tmux-$$" wt out rc=0 old child new unrelated holder terminal audit
+  local -a recovery
   dir=$(new_case missing-vessel-worker "$id")
   anchor="$dir/anchor"
   mkdir -p "$anchor"
@@ -2783,16 +2784,20 @@ test_vessel_reclaims_a_missing_tmux_worker() (
   export TREEHOUSE_ROOT="$vessel/worktrees" NM_HOME="$vessel/no-mistakes"
   export TMUX_TMPDIR="$vessel/tmux" LAVISH_AXI_STATE_DIR="$vessel/lavish-axi" PI_CODING_AGENT_SESSION_DIR="$vessel/pi/sessions"
 
-  python3 -c 'import os, subprocess, sys, time; os.setsid(); child = subprocess.Popen(["/bin/sleep", "90"]); open(sys.argv[1], "w").write(str(child.pid)); time.sleep(90)' "$dir/fake/child-pid" & old=$!
+  python3 -c 'import os, subprocess, sys, time; os.setsid(); child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(90)"]); open(sys.argv[1], "w").write(str(child.pid)); time.sleep(90)' "$dir/fake/child-pid" & old=$!
+  /bin/sleep 90 & unrelated=$!
   python3 -c 'import os, sys, time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(90)' "$dir/fake/pane-pid" & new=$!
-  trap 'child=$(< "$dir/fake/child-pid"); kill "$old" "$new" ${child:+"$child"} 2>/dev/null || true; wait "$old" "$new" 2>/dev/null || true; fm_test_remove_tree "/tmp/fm-$id"' EXIT
+  trap 'child=$(< "$dir/fake/child-pid"); kill "$old" "$new" "$unrelated" ${child:+"$child"} 2>/dev/null || true; wait "$old" "$new" "$unrelated" 2>/dev/null || true; fm_test_remove_tree "/tmp/fm-$id"' EXIT
   for _ in $(seq 1 100); do
     [ -s "$dir/fake/child-pid" ] && [ -s "$dir/fake/pane-pid" ] && break
     /bin/sleep .02
   done
   [ -s "$dir/fake/child-pid" ] && [ -s "$dir/fake/pane-pid" ] || fail 'isolated fixture terminal did not start'
   child=$(< "$dir/fake/child-pid")
-  printf 'tmux_worker_terminal=%s:%s:%s\n' "$(< /proc/sys/kernel/random/boot_id)" "$(stat -Lc %i /proc/self/ns/pid)" "$old" >> "$dir/home/state/$id.meta"
+  printf 'pr=https://example.invalid/pull/4538\nbranch=task-%s\n' "$id" >> "$dir/home/state/$id.meta"
+  if [ "${FM_TEST_RECOVERY_LEGACY:-0}" -eq 0 ]; then
+    printf 'tmux_worker_terminal=%s:%s:%s:%s\n' "$(< /proc/sys/kernel/random/boot_id)" "$(stat -Lc %i /proc/self/ns/pid)" "$old" "$(awk '{print $22}' "/proc/$old/stat")" >> "$dir/home/state/$id.meta"
+  fi
   printf 'preserve local edits\n' > "$wt/dirty.txt"
   printf 'bash' > "$dir/fake/command"
   printf 'pi' > "$dir/fake/becomes"
@@ -2800,32 +2805,117 @@ test_vessel_reclaims_a_missing_tmux_worker() (
 
   out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
   expect_code 1 "$rc" "a missing pane must not hide a live worker"
-  assert_contains "$out" "original terminal session $old still has a live process" 'refusal did not identify the old terminal'
   assert_absent "$dir/fake/created-windows" 'refusal created a duplicate window'
-
-  kill "$old"
-  wait "$old" 2>/dev/null || true
+  if [ "${FM_TEST_RECOVERY_LEGACY:-0}" -eq 1 ]; then
+    out=$(run_control "$dir" "$id" relaunch --confirm-stopped other --stop-evidence 'Wrong task.' --note 'Do not replace.') && fail 'wrong task confirmation allowed recovery'
+    assert_absent "$dir/fake/created-windows" 'wrong task confirmation started a replacement'
+    kill "$old"
+    kill -KILL "$child"
+    wait "$old" 2>/dev/null || true
+    recovery=(--confirm-stopped "$id" --stop-evidence "Verified original terminal and child $child stopped.")
+  elif [ "${FM_TEST_RECOVERY_EMERGENCY:-0}" -eq 1 ]; then
+    assert_contains "$out" "original terminal session $old still has a live process" 'refusal did not identify the old terminal'
+    cp "$dir/home/state/$id.meta" "$dir/verified.meta"
+    awk '/^tmux_worker_terminal=/ {sub(/:[0-9]+$/, ":0")} {print}' "$dir/verified.meta" > "$dir/home/state/$id.meta"
+    out=$(run_control "$dir" "$id" relaunch --emergency-stop --note 'Do not stop a reused identity.') && fail 'wrong birth identity authorized a stop'
+    assert_contains "$out" 'cannot verify who owns terminal session' 'mismatched start time was not the reason for refusal'
+    kill -0 "$old" "$child" 2>/dev/null || fail 'an unverified process was signaled'
+    assert_absent "$dir/fake/created-windows" 'unverified identity allowed a replacement'
+    cp "$dir/verified.meta" "$dir/home/state/$id.meta"
+    ln -s "$wt/dirty.txt" "$dir/home/state/$id.control-recovery.jsonl"
+    out=$(run_control "$dir" "$id" relaunch --emergency-stop --note 'Reject unsafe audit storage.') && fail 'an unsafe audit file allowed a stop'
+    assert_contains "$out" 'could not verify a scoped stop' 'unsafe audit file was not refused'
+    kill -0 "$old" "$child" 2>/dev/null || fail 'recovery sent a signal without an audit'
+    [ "$(< "$wt/dirty.txt")" = 'preserve local edits' ] || fail 'recovery followed a symlink into the local copy'
+    rm "$dir/home/state/$id.control-recovery.jsonl"
+    if [ "${FM_TEST_RECOVERY_RETRY:-0}" -eq 1 ]; then
+      # Resume after a verified TERM was audited but recovery was interrupted.
+      terminal=$(meta_field "$dir" "$id" tmux_worker_terminal)
+      audit="$dir/home/state/$id.control-recovery.jsonl"
+      (umask 077; jq -nc --arg task "$id" --arg endpoint "fmses:fm-$id" \
+        --arg worktree "$wt" --arg terminal "$terminal" --arg child "$child" \
+        --arg start "$(awk '{print $22}' "/proc/$child/stat")" \
+        '{event:"SIGTERM",$task,$endpoint,$worktree,$terminal,processes:{($child):$start}}' > "$audit")
+      kill "$old"
+      wait "$old" 2>/dev/null || true
+    fi
+    recovery=(--emergency-stop)
+  else
+    assert_contains "$out" "original terminal session $old still has a live process" 'refusal did not identify the old terminal'
+    kill "$old"
+    wait "$old" 2>/dev/null || true
+    rc=0
+    out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
+    expect_code 1 "$rc" 'a child in the original terminal must prevent reclaim even after its leader exits'
+    assert_contains "$out" "(PID $child)" 'refusal did not identify the surviving process'
+    kill -KILL "$child"
+    recovery=()
+  fi
+  if [ "${FM_TEST_RECOVERY_EMERGENCY:-0}" -eq 0 ]; then
+    for _ in $(seq 1 100); do
+      [[ ! -r "/proc/$child/stat" ]] || [[ "$(< "/proc/$child/stat")" == *') Z '* ]] && break
+      /bin/sleep .02
+    done
+  fi
   rc=0
-  out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
-  expect_code 1 "$rc" 'a child in the original terminal must prevent reclaim even after its leader exits'
-  assert_contains "$out" "(PID $child)" 'refusal did not identify the surviving process'
-  assert_absent "$dir/fake/created-windows" 'surviving child did not prevent a duplicate window'
-
-  kill "$child"
-  for _ in $(seq 1 100); do
-    [[ ! -r "/proc/$child/stat" ]] || [[ "$(< "/proc/$child/stat")" == *') Z '* ]] && break
-    /bin/sleep .02
-  done
-  rc=0
-  out=$(run_control "$dir" "$id" relaunch --note 'Continue from the existing work.') || rc=$?
-  expect_code 0 "$rc" "relaunch should recover a worker whose original terminal session is gone"$'\n'"$out"
+  if [ "${FM_TEST_RECOVERY_LEGACY:-0}" -eq 1 ]; then
+    # Exercise the task lock without the supervision host's additional lease serialization.
+    touch "$vessel/config/supervision-host-off"
+    unset PI_CODING_AGENT FM_SUPERVISION_ACTOR
+    out=$(FM_CONTROL_STOP_ATTESTED="$id" run_spawn "$dir" "$id" --relaunch) && fail 'standalone spawn accepted a forged attestation'
+    FM_FAKE_CWD_RACE_READY="$dir/ready" FM_FAKE_CWD_RACE_RELEASE="$dir/release" \
+      run_control "$dir" "$id" relaunch "${recovery[@]}" --note 'Continue from existing work.' > "$dir/recovery.log" &
+    holder=$!
+    for _ in $(seq 1 200); do
+      [ -e "$dir/ready" ] && break
+      kill -0 "$holder" 2>/dev/null || break
+      /bin/sleep .025
+    done
+    if [ ! -e "$dir/ready" ]; then
+      : > "$dir/release"
+      wait "$holder" || true
+      fail "recovery did not reach its replacement endpoint: $(< "$dir/recovery.log")"
+    fi
+    out=$(run_control "$dir" "$id" relaunch "${recovery[@]}" --note 'Concurrent recovery.') || rc=$?
+    : > "$dir/release"
+    wait "$holder" || fail "the first recovery failed: $(< "$dir/recovery.log")"
+    expect_code 1 "$rc" "concurrent recovery must refuse"
+    assert_contains "$out" "another lifecycle action is already running" 'the task lock did not serialize emergency recovery'
+    [ "$(wc -l < "$dir/home/state/$id.control-recovery.jsonl")" -eq 1 ] || fail 'concurrent attempt recorded another attestation'
+  else
+    out=$(run_control "$dir" "$id" relaunch "${recovery[@]}" --note 'Continue from the existing work.') || rc=$?
+    expect_code 0 "$rc" "relaunch should recover the worker via its selected stop path"$'\n'"$out"
+  fi
+  kill -0 "$unrelated" 2>/dev/null || fail 'recovery signaled an unrelated process'
+  [ "$(meta_field "$dir" "$id" branch)" = "task-$id" ] || fail 'recovery changed the branch'
+  [ "$(meta_field "$dir" "$id" pr)" = 'https://example.invalid/pull/4538' ] || fail 'recovery lost the attached PR'
+  if [ "${FM_TEST_RECOVERY_LEGACY:-0}" -eq 1 ]; then
+    assert_grep "Verified original terminal and child $child stopped." "$dir/home/state/$id.control-recovery.jsonl" 'operator evidence was not audited'
+    out=$(run_control "$dir" "$id" relaunch "${recovery[@]}" --note 'Do not reuse old confirmation.') && fail 'stale confirmation allowed another launch'
+  elif [ "${FM_TEST_RECOVERY_EMERGENCY:-0}" -eq 1 ]; then
+    jq -se 'map(.event)[-3:] == ["SIGTERM","SIGKILL","verified-stopped"]' "$dir/home/state/$id.control-recovery.jsonl" >/dev/null \
+      || fail 'stop phases were not audited in order'
+    [[ ! -r "/proc/$child/stat" ]] || [[ "$(< "/proc/$child/stat")" == *') Z '* ]] || fail 'replacement launched before the old process exited'
+  fi
   [ "$(< "$dir/fake/created-windows")" = "fm-$id" ] || fail 'relaunch did not create exactly one replacement window'
   [ "$(meta_field "$dir" "$id" worktree)" = "$wt" ] || fail 'reclaim changed the recorded local copy'
   [ "$(< "$wt/dirty.txt")" = 'preserve local edits' ] || fail 'reclaim discarded local edits'
-  [ "$(meta_field "$dir" "$id" tmux_worker_terminal | awk -F: '{print $NF}')" = "$new" ] || fail 'replacement did not record its own terminal session'
+  [ "$(meta_field "$dir" "$id" tmux_worker_terminal | awk -F: '{print $3}')" = "$new" ] || fail 'replacement did not record its own terminal session'
   out=$(run_control "$dir" "$id" relaunch --note 'Use the same local copy.') || fail "ordinary relaunch after recovery failed: $out"
   [ "$(< "$dir/fake/created-windows")" = "fm-$id" ] || fail 'repeating relaunch created a second window'
-  pass "vessel tmux: missing window does not hide a live worker and a proven-gone worker can relaunch in place"
+  pass "vessel tmux: ${recovery[0]:-verified absence} recovers the original task without duplicating its worker"
+)
+
+test_vessel_emergency_relaunch_stops_only_its_worker() (
+  FM_TEST_RECOVERY_EMERGENCY=1 test_vessel_reclaims_a_missing_tmux_worker
+)
+
+test_vessel_emergency_relaunch_retries_after_the_leader_stops() (
+  FM_TEST_RECOVERY_EMERGENCY=1 FM_TEST_RECOVERY_RETRY=1 test_vessel_reclaims_a_missing_tmux_worker
+)
+
+test_vessel_relaunch_accepts_an_audited_legacy_confirmation() (
+  FM_TEST_RECOVERY_LEGACY=1 test_vessel_reclaims_a_missing_tmux_worker
 )
 
 test_reclaim_refuses_an_unreadable_endpoint() {
@@ -3470,6 +3560,9 @@ test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_vessel_reclaims_a_missing_tmux_worker
+test_vessel_emergency_relaunch_stops_only_its_worker
+test_vessel_emergency_relaunch_retries_after_the_leader_stops
+test_vessel_relaunch_accepts_an_audited_legacy_confirmation
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone

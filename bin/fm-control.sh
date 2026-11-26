@@ -7,6 +7,13 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--account <entry>]
 #                                         (--note <text> | --note-file <path>)
+#                                         [--emergency-stop |
+#                                          --confirm-stopped <task-id> --stop-evidence <text>]
+# Emergency recovery is for local vessel tmux ships/scouts. --emergency-stop
+# authorizes scoped TERM/KILL if normal exit cannot stop the verified worker.
+# --confirm-stopped is an operator attestation for legacy records only: attest
+# that the exact old worker and its jobs exited, and state how you verified it.
+# Both paths write state/<task-id>.control-recovery.jsonl before any escalation.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -275,6 +282,10 @@ EFFORT_SET=0
 ACCOUNT_SET=0
 NOTE=
 NOTE_SET=0
+EMERGENCY_STOP=0
+CONFIRM_STOPPED=
+STOP_EVIDENCE=
+unset FM_CONTROL_STOP_ATTESTED
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -287,6 +298,8 @@ for control_arg in "$@"; do
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       account) NEW_ACCOUNT=$control_arg; ACCOUNT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      confirm-stopped) CONFIRM_STOPPED=$control_arg ;;
+      stop-evidence) STOP_EVIDENCE=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -305,6 +318,9 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --account) control_want_value=account ;;
     --account=*) NEW_ACCOUNT=${control_arg#--account=}; ACCOUNT_SET=1 ;;
+    --emergency-stop) EMERGENCY_STOP=1 ;;
+    --confirm-stopped) control_want_value=confirm-stopped ;;
+    --stop-evidence) control_want_value=stop-evidence ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -343,6 +359,14 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+if [ "$EMERGENCY_STOP" = 1 ] || [ -n "$CONFIRM_STOPPED$STOP_EVIDENCE" ]; then
+  [ "$VERB" = relaunch ] || die "emergency recovery applies to 'relaunch' only"
+  if [ -n "$CONFIRM_STOPPED$STOP_EVIDENCE" ]; then
+    [ "$EMERGENCY_STOP" = 0 ] || die "--emergency-stop and --confirm-stopped are mutually exclusive"
+    [ "$CONFIRM_STOPPED" = "$ID" ] && [[ "$STOP_EVIDENCE" =~ [^[:space:]] ]] \
+      || die "--confirm-stopped must name the exact task and include nonempty --stop-evidence"
+  fi
+fi
 # Supervision lease guard: lifecycle control is overlap territory between the
 # two Pi supervision actors; refuse while the OTHER actor holds this task's
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
@@ -392,6 +416,11 @@ RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
+if [ "$EMERGENCY_STOP" = 1 ] || [ -n "$CONFIRM_STOPPED" ]; then
+  [ -n "${FM_ANCHOR:-}" ] && [ "$BACKEND" = tmux ] && [[ "$KIND" = ship || "$KIND" = scout ]] \
+    || die "emergency worker recovery requires a local vessel tmux ship or scout"
+  fm_lease_forbid_branch "emergency worker recovery"
+fi
 # OpenCode's composer exit key changed between its 1.x and 2.x lines; the major
 # spawn detected is recorded here so the exit command below matches the running
 # agent. Absent (a legacy record or a non-opencode task) it stays empty.
@@ -1221,8 +1250,47 @@ record_note() {
   esac
 }
 
+stop_for_relaunch() {
+  local original raw current result audit="$STATE/$ID.control-recovery.jsonl"
+  if [ "$EMERGENCY_STOP" = 0 ] && [ -z "$CONFIRM_STOPPED" ]; then
+    do_exit
+    return
+  fi
+  original=$(fm_meta_get "$META" tmux_worker_terminal)
+  if [ -n "$CONFIRM_STOPPED" ]; then
+    [ -z "$original" ] || die "task $ID has a terminal record; use normal relaunch or --emergency-stop, not operator attestation"
+    raw=$(agent_state)
+    case "$raw" in
+      missing|dead) ;;
+      *) die "task $ID's endpoint reads '$raw'; operator attestation cannot override it" ;;
+    esac
+    python3 "$SCRIPT_DIR/fm-tmux-worker.py" attest "$audit" "$ID" "$T" "$WT" "$STOP_EVIDENCE" \
+      || die "could not audit the operator's stop attestation; no replacement was launched"
+    printf 'operator-attested'
+    return
+  fi
+  [ -n "$original" ] || die "no terminal identity for $ID; after verifying it stopped, use --confirm-stopped $ID --stop-evidence '<how you verified>'"
+  raw=$(agent_state)
+  current=
+  if [ "$raw" = alive ]; then
+    current=$(fm_control_tmux_worker_record "$T") || current=
+  fi
+  if [ -n "$current" ] && [[ "$current" = "$original" || "${current%:*}" = "$original" ]]; then
+    if result=$( (trap - EXIT; set -e; do_exit) ); then
+      if [ "$result" != endpoint-gone ] &&
+        python3 "$SCRIPT_DIR/fm-tmux-worker.py" idle "$original"; then
+        printf '%s' "$result"
+        return
+      fi
+    fi
+  fi
+  python3 "$SCRIPT_DIR/fm-tmux-worker.py" stop "$original" "$audit" "$ID" "$T" "$WT" \
+    || die "could not verify a scoped stop for $ID; no replacement was launched"
+  printf 'endpoint-gone'
+}
+
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line attest=
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1262,7 +1330,8 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  exit_result=$(stop_for_relaunch)
+  [ "$exit_result" != operator-attested ] || attest=$ID
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -1273,7 +1342,7 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_ACCOUNT" ] || spawn_args+=(--account "$TARGET_ACCOUNT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_CONTROL_STOP_ATTESTED="$attest" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded

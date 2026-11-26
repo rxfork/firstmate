@@ -415,7 +415,7 @@ fm_control_agent_state() {  # <backend> <target> <meta>
     terminal=$(fm_meta_get "$3" tmux_worker_terminal)
     if [ -n "$terminal" ]; then
       current=$(fm_control_tmux_worker_record "$2" 2>/dev/null) || current=
-      if [ "$current" != "$terminal" ] &&
+      if [[ "$current" != "$terminal" && "${current%:*}" != "$terminal" ]] &&
         { [ "$raw" != dead ] || [ -z "$current" ] || ! fm_control_tmux_worker_gone "$terminal" >/dev/null 2>&1; }; then
         printf 'ambiguous'
         return 0
@@ -497,10 +497,13 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
       terminal=$(fm_meta_get "$meta" tmux_worker_terminal)
       if [ -z "${FM_ANCHOR:-}" ] || [ -z "$terminal" ]; then
         printf 'unproven\ttmux has no recorded terminal identity for this worker; a missing window does not prove the worker stopped'
+        if [ -n "${FM_ANCHOR:-}" ]; then
+          printf '; after an operator verifies the exact worker stopped, use --confirm-stopped %s --stop-evidence with relaunch' "${target##*:fm-}"
+        fi
       elif reason=$(fm_control_tmux_worker_gone "$terminal" 2>&1); then
         printf 'gone\t'
       else
-        printf 'unproven\t%s' "$reason"
+        printf 'unproven\t%s; use relaunch --emergency-stop only if authorized to stop the verified worker' "$reason"
       fi
       ;;
     herdr)

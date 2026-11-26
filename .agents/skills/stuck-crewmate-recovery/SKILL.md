@@ -71,8 +71,9 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 A HERDR endpoint that is not merely idle but destroyed - a pane or workspace removed in Herdr churn - is recovered by that same relaunch, which creates one fresh endpoint in the existing worktree and rebinds the task's record to it; nothing special is needed, and the worktree is untouched ([`docs/agent-control.md`](../../../docs/agent-control.md) "Reclaiming a task whose endpoint is gone").
 That relaunch proves the endpoint is destroyed before it rebinds, so a Herdr server that was merely stopped is adopted back rather than duplicated.
 For a local vessel tmux endpoint reported unverified, use the normal relaunch command after checking current task and validation ownership as above; it checks the original terminal session before creating a replacement.
-If it finds a surviving process or lacks the original identity, preserve the work, use the reported evidence to look for the original endpoint, and apply Blocker ownership before escalating.
-See the [endpoint reclaim contract](../../../docs/agent-control.md#reclaiming-a-task-whose-endpoint-is-gone).
+If a verified local worker will not stop, use the [emergency recovery path](../../../docs/agent-control.md#emergency-recovery-for-local-vessel-tmux) when authorized to force-stop it.
+For a legacy worker without a terminal identity, use the reported evidence to locate the original worker and ask the operator for the exact stopped-worker attestation if needed; never supply that attestation yourself.
+Apply Blocker ownership to the affected task while recovery is pending.
 On T3 Code there is no replacement relaunch: the thread keeps its conversation, so a turn or provider change continues the same agent; preserve the task record and worktree and follow [`docs/t3code-backend.md`](../../../docs/t3code-backend.md#restart-and-liveness-behavior) instead of trying to respawn it.
 Do not work around these refusals by respawning; preserve the recorded task and follow the backend's recovery contract.
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.

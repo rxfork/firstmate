@@ -2595,7 +2595,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_control_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
-  if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ "${FM_CONTROL_STOP_ATTESTED:-}" = "$ID" ]; then
+    # Only the audited, lock-owning control transaction can authorize this launch.
+    if [ "$BACKEND" != tmux ] || [ -z "${FM_ANCHOR:-}" ] ||
+      [ -n "$(fm_meta_get "$RELAUNCH_META" tmux_worker_terminal)" ] ||
+      ! [[ "$RELAUNCH_STATE" = missing || "$RELAUNCH_STATE" = dead ]]; then
+      echo "error: task $ID changed after its operator stop attestation; refusing the replacement" >&2
+      exit 1
+    fi
+  elif fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
@@ -7542,7 +7550,9 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 TMUX_WORKER_TERMINAL=
 if [ "$BACKEND" = tmux ] && [ -n "${FM_ANCHOR:-}" ] && [ "$KIND" != secondmate ]; then
   if ! TMUX_WORKER_TERMINAL=$(fm_control_tmux_worker_record "$WT_TARGET"); then
-    if [ "$RELAUNCH" -eq 1 ] && [ -n "$(fm_meta_get "$RELAUNCH_META" tmux_worker_terminal)" ]; then
+    if [ "$RELAUNCH" -eq 1 ] && { [ "$RELAUNCH_REBIND" -eq 1 ] ||
+      { [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ "${FM_CONTROL_STOP_ATTESTED:-}" = "$ID" ]; } ||
+      [ -n "$(fm_meta_get "$RELAUNCH_META" tmux_worker_terminal)" ]; }; then
       echo "error: could not verify the terminal identity for $ID's replacement; keeping the prior task record" >&2
       exit 1
     fi
